@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { fetchGroupById } from "@/lib/groups";
+import { toSupabaseGroupId } from "@/lib/groupId";
+import { fetchQuestionnaireResponseCountForGroup } from "@/lib/questionnaire";
 import { getSupabase } from "@/lib/supabase";
 
 type Participant = {
@@ -30,6 +32,9 @@ export default function GroupPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [responseCount, setResponseCount] = useState(0);
+  const [isLoadingResponses, setIsLoadingResponses] = useState(true);
+  const [isSendingInvitations, setIsSendingInvitations] = useState(false);
 
   const fetchGroup = useCallback(async () => {
     const { data, error: fetchError } = await fetchGroupById(groupId);
@@ -43,10 +48,12 @@ export default function GroupPage() {
   }, [groupId]);
 
   const fetchParticipants = useCallback(async () => {
+    const databaseGroupId = toSupabaseGroupId(groupId);
+
     const { data, error: fetchError } = await getSupabase()
       .from("participants")
-      .select("id, name, group_id")
-      .eq("group_id", groupId)
+      .select("*")
+      .eq("group_id", databaseGroupId)
       .order("name", { ascending: true });
 
     if (fetchError) {
@@ -54,19 +61,45 @@ export default function GroupPage() {
       return;
     }
 
-    setParticipants(data ?? []);
+    setParticipants(
+      (data ?? []).map((participant) => ({
+        id: String(participant.id),
+        name: participant.name,
+        group_id: String(participant.group_id),
+      })),
+    );
+  }, [groupId]);
+
+  const fetchResponseCount = useCallback(async () => {
+    setIsLoadingResponses(true);
+
+    const { count, error: countError } =
+      await fetchQuestionnaireResponseCountForGroup(groupId);
+
+    if (countError) {
+      setError(countError);
+      setResponseCount(0);
+    } else {
+      setResponseCount(count);
+    }
+
+    setIsLoadingResponses(false);
   }, [groupId]);
 
   useEffect(() => {
     async function load() {
       setIsLoading(true);
       setError(null);
-      await Promise.all([fetchGroup(), fetchParticipants()]);
+      await Promise.all([
+        fetchGroup(),
+        fetchParticipants(),
+        fetchResponseCount(),
+      ]);
       setIsLoading(false);
     }
 
     load();
-  }, [fetchGroup, fetchParticipants]);
+  }, [fetchGroup, fetchParticipants, fetchResponseCount]);
 
   async function handleAddParticipants() {
     const names = parseNames(namesText);
@@ -81,7 +114,12 @@ export default function GroupPage() {
 
     const { error: insertError } = await getSupabase()
       .from("participants")
-      .insert(names.map((name) => ({ name, group_id: groupId })));
+      .insert(
+        names.map((name) => ({
+          name,
+          group_id: toSupabaseGroupId(groupId),
+        })),
+      );
 
     setIsSaving(false);
 
@@ -103,6 +141,22 @@ export default function GroupPage() {
       setTimeout(() => setLinkCopied(false), 2500);
     } catch {
       setError("No se pudo copiar el enlace. Inténtalo de nuevo.");
+    }
+  }
+
+  async function handleSendInvitations() {
+    setIsSendingInvitations(true);
+
+    try {
+      await fetch("/api/send-invitations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ groupId }),
+      });
+    } catch (error) {
+      console.error("[GroupPage] Error al enviar:", error);
+    } finally {
+      setIsSendingInvitations(false);
     }
   }
 
@@ -133,31 +187,63 @@ export default function GroupPage() {
           </div>
         )}
 
-        <section className="rounded-xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50 p-6 shadow-sm">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-amber-900">
+        <section className="rounded-xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50 shadow-sm">
+          <div className="grid gap-8 p-6 md:grid-cols-[1fr_2fr] md:items-center md:gap-10 md:p-8">
+            <div className="max-w-md shrink-0">
+              <h2 className="text-lg font-semibold tracking-tight text-amber-900">
                 Dinámica de Equipo
               </h2>
-              <p className="mt-1 text-sm text-amber-800/80">
-                Comparte este enlace con los colaboradores del equipo para que
-                completen el análisis de redes.
+              <p className="mt-2 text-sm leading-relaxed text-amber-800/80">
+                Comparte el enlace o envía invitaciones por correo con el token
+                único de cada colaborador.
               </p>
             </div>
-            <div className="flex shrink-0 flex-col gap-3 sm:flex-row">
+
+            <div className="flex flex-wrap items-center justify-start gap-4 md:flex-nowrap md:justify-end">
+              <button
+                type="button"
+                onClick={handleSendInvitations}
+                disabled={isSendingInvitations || isLoading}
+                className="inline-flex h-14 min-h-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-violet-600 to-violet-500 px-5 text-sm font-bold text-white shadow-md shadow-violet-500/25 transition-all hover:from-violet-500 hover:to-violet-400 hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSendingInvitations ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Enviando invitaciones…
+                  </span>
+                ) : (
+                  "Enviar Invitaciones por Email"
+                )}
+              </button>
+
               <button
                 type="button"
                 onClick={handleCopyStudentLink}
-                className="inline-flex items-center justify-center rounded-xl bg-amber-500 px-6 py-3 text-base font-bold text-white shadow-md transition-all hover:bg-amber-400 hover:shadow-lg active:scale-[0.98]"
+                className="inline-flex h-14 min-h-14 shrink-0 items-center justify-center rounded-xl bg-amber-500 px-5 text-sm font-bold text-white shadow-md transition-all hover:bg-amber-400 hover:shadow-lg active:scale-[0.98]"
               >
                 {linkCopied ? "¡Enlace copiado!" : "Copiar Enlace para Colaboradores"}
               </button>
-              <Link
-                href={`/group/${groupId}/resultados`}
-                className="inline-flex items-center justify-center rounded-xl bg-indigo-600 px-6 py-3 text-base font-bold text-white shadow-md transition-all hover:bg-indigo-500 hover:shadow-lg active:scale-[0.98]"
-              >
-                Ver Resultados
-              </Link>
+
+              {isLoadingResponses ? (
+                <span className="inline-flex h-14 min-h-14 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-100 px-5 text-sm font-semibold text-slate-500">
+                  Verificando respuestas…
+                </span>
+              ) : responseCount > 0 ? (
+                <Link
+                  href={`/group/${groupId}/resultados`}
+                  className="inline-flex h-14 min-h-14 shrink-0 items-center justify-center rounded-xl bg-indigo-600 px-5 text-sm font-bold text-white shadow-md transition-all hover:bg-indigo-500 hover:shadow-lg active:scale-[0.98]"
+                >
+                  Ver Resultados
+                </Link>
+              ) : (
+                <div
+                  className="inline-flex h-14 min-h-14 max-w-xs shrink-0 items-center rounded-xl border border-indigo-200 bg-indigo-50/90 px-5 text-sm font-medium leading-snug text-indigo-800"
+                  role="status"
+                >
+                  Esperando a que los colaboradores respondan la encuesta para
+                  generar el reporte de ElevateX.
+                </div>
+              )}
             </div>
           </div>
         </section>

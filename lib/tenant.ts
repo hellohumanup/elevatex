@@ -1,12 +1,14 @@
 /**
- * Tenant por defecto en desarrollo local (sin auth todavía).
+ * Tenant por defecto en desarrollo local (UUID).
  * Override con NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID en .env.local.
  */
-export function getDefaultOrganizationId(): number {
-  const raw = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID;
-  const parsed = raw ? Number(raw) : 1;
+export function getDefaultOrganizationId(): string {
+  const fromEnv = process.env.NEXT_PUBLIC_DEFAULT_ORGANIZATION_ID?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
 
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+  return "00000000-0000-0000-0000-000000000001";
 }
 
 /**

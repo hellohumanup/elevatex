@@ -19,7 +19,8 @@
       }
     ],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "@supabase/auth-helpers-nextjs": ["./lib/supabase/auth-helpers-nextjs-shim.ts"]
     }
   },
   "include": [

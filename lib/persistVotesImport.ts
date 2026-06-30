@@ -9,7 +9,7 @@ import type {
 import { getSupabase } from "@/lib/supabase";
 
 export type PersistedVotesImport = {
-  organizationId: number;
+  organizationId: string;
   organizationName: string;
   participants: ImportedParticipant[];
   responses: ImportedResponse[];
@@ -19,7 +19,7 @@ function normalizeName(name: string): string {
   return name.trim().toLowerCase();
 }
 
-async function resolveOrganizationId(orgId: DemoOrgId): Promise<number> {
+async function resolveOrganizationId(orgId: DemoOrgId): Promise<string> {
   const organization = getDemoOrganization(orgId);
   const supabase = getSupabase();
 
@@ -33,8 +33,8 @@ async function resolveOrganizationId(orgId: DemoOrgId): Promise<number> {
     throw new Error(lookupError.message);
   }
 
-  if (byName) {
-    return byName.id;
+  if (byName?.id) {
+    return String(byName.id);
   }
 
   const { data: created, error: insertError } = await supabase
@@ -47,7 +47,7 @@ async function resolveOrganizationId(orgId: DemoOrgId): Promise<number> {
     throw new Error(insertError.message);
   }
 
-  return created.id;
+  return String(created.id);
 }
 
 export async function persistVotesImportToSupabase(input: {

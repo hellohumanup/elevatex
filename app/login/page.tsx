@@ -1,45 +1,26 @@
 "use client";
 
-import { createBrowserClient } from "@supabase/ssr";
-import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useMemo, useState } from "react";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { translateAuthError } from "@/lib/supabase/auth-errors";
-import { getSupabaseEnv } from "@/lib/supabase/env";
-import { waitForBrowserSession } from "@/lib/supabase/client";
 
-function decodeAuthError(value: string | null): string | null {
-  if (!value) {
-    return null;
-  }
+const inputClassName =
+  "w-full rounded-lg border border-slate-800 bg-slate-900/80 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 transition-all focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:cursor-not-allowed disabled:opacity-50";
 
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function LoginForm() {
+export default function LoginPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const authError = searchParams.get("error");
-  const clientEnv = getSupabaseEnv();
+  const supabase = createClientComponentClient();
 
-  const supabase = useMemo(() => {
-    if (!clientEnv) {
-      return null;
-    }
-
-    return createBrowserClient(clientEnv.supabaseUrl, clientEnv.supabaseAnonKey);
-  }, [clientEnv]);
-
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(decodeAuthError(authError));
+  const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  async function handleSignIn(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (!email.trim() || !password) {
@@ -47,100 +28,174 @@ function LoginForm() {
       return;
     }
 
-    if (!clientEnv || !supabase) {
-      setError(
-        "No se detectaron NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY.",
-      );
-      return;
-    }
-
     setIsSubmitting(true);
     setError(null);
+    setSuccessMessage(null);
 
     try {
-      const { data, error: signInError } = await supabase.auth.signInWithPassword(
-        {
-          email: email.trim(),
-          password,
-        },
-      );
+      const { data, error: signInError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
 
       if (signInError) {
         setError(translateAuthError(signInError.message));
         return;
       }
 
-      if (!data || !data.session || !data.session.user) {
-        setError(
-          "El inicio de sesión no devolvió una sesión válida. Inténtalo de nuevo.",
-        );
+      if (!data.session?.user) {
+        setError("No se pudo establecer la sesión. Inténtalo de nuevo.");
         return;
       }
 
-      const sessionReady = await waitForBrowserSession(supabase);
-
-      if (!sessionReady) {
-        const { data: sessionData, error: sessionError } =
-          await supabase.auth.getSession();
-
-        if (sessionError || !sessionData?.session?.user) {
-          setError(
-            "La sesión no se guardó en las cookies del navegador. Recarga e inténtalo otra vez.",
-          );
-          return;
-        }
-      }
-
-      router.refresh();
-      router.push("/cuestionario");
+      router.push("/admin/surveys");
     } catch (caughtError) {
-      const message =
+      setError(
         caughtError instanceof Error
           ? translateAuthError(caughtError.message)
-          : "Error inesperado al iniciar sesión.";
-
-      setError(message);
+          : "Error inesperado al iniciar sesión.",
+      );
     } finally {
       setIsSubmitting(false);
     }
   }
 
+  async function handleSignUp(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!name.trim() || !email.trim() || !password) {
+      setError("Completa nombre, email y contraseña.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+    setSuccessMessage(null);
+
+    try {
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          data: { name: name.trim() },
+        },
+      });
+
+      if (signUpError) {
+        setError(translateAuthError(signUpError.message));
+        return;
+      }
+
+      if (data.session?.user) {
+        router.push("/admin/surveys");
+        return;
+      }
+
+      setSuccessMessage(
+        "Cuenta creada. Confirma tu email si es necesario y luego inicia sesión.",
+      );
+      setIsSignUp(false);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? translateAuthError(caughtError.message)
+          : "Error inesperado al registrarse.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  function switchTab(signUp: boolean) {
+    setIsSignUp(signUp);
+    setError(null);
+    setSuccessMessage(null);
+  }
+
   return (
-    <div className="min-h-full bg-slate-50">
-      <div className="mx-auto flex min-h-full max-w-md flex-col justify-center px-6 py-16">
-        <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+    <div className="flex min-h-full items-center justify-center bg-slate-950 px-6 py-16">
+      <div className="w-full max-w-md">
+        <div className="rounded-2xl border border-slate-800/80 bg-slate-900/50 p-8 shadow-2xl shadow-black/30 ring-1 ring-white/5 sm:p-10">
           <div className="mb-8 text-center">
-            <span className="inline-flex rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-indigo-700">
-              Acceso Seguro
-            </span>
-            <h1 className="mt-4 text-2xl font-semibold tracking-tight text-slate-900">
-              Iniciar sesión
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-purple-400/90">
+              ElevateX
+            </p>
+            <h1 className="mt-3 text-2xl font-semibold tracking-tight text-white">
+              {isSignUp ? "Registrarse" : "Iniciar Sesión"}
             </h1>
             <p className="mt-2 text-sm text-slate-500">
-              Accede a tu espacio confidencial de dinámica de equipo.
+              Panel de administración de encuestas EDT
             </p>
           </div>
 
-          {!clientEnv && (
-            <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-              Configuración incompleta: revisa las variables de entorno de Supabase
-              en `.env.local`.
-            </div>
-          )}
+          <div className="mb-8 flex rounded-lg border border-slate-800 bg-slate-950 p-1">
+            <button
+              type="button"
+              onClick={() => switchTab(false)}
+              className={`flex-1 rounded-md py-2.5 text-sm font-medium transition-colors ${
+                !isSignUp
+                  ? "bg-slate-800 text-white shadow-sm"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              Iniciar Sesión
+            </button>
+            <button
+              type="button"
+              onClick={() => switchTab(true)}
+              className={`flex-1 rounded-md py-2.5 text-sm font-medium transition-colors ${
+                isSignUp
+                  ? "bg-slate-800 text-white shadow-sm"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              Registrarse
+            </button>
+          </div>
 
           {error && (
-            <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <div className="mb-6 rounded-lg border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-300">
               {error}
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-5">
+          {successMessage && (
+            <div className="mb-6 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-4 py-3 text-sm text-emerald-300">
+              {successMessage}
+            </div>
+          )}
+
+          <form
+            onSubmit={isSignUp ? handleSignUp : handleSignIn}
+            className="space-y-4"
+          >
+            {isSignUp && (
+              <div>
+                <label
+                  htmlFor="name"
+                  className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-500"
+                >
+                  Nombre
+                </label>
+                <input
+                  id="name"
+                  type="text"
+                  autoComplete="name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  disabled={isSubmitting}
+                  className={inputClassName}
+                  placeholder="Tu nombre"
+                />
+              </div>
+            )}
+
             <div>
               <label
                 htmlFor="email"
-                className="mb-2 block text-sm font-medium text-slate-700"
+                className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-500"
               >
-                Email corporativo
+                Email
               </label>
               <input
                 id="email"
@@ -149,7 +204,7 @@ function LoginForm() {
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 disabled={isSubmitting}
-                className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-4 focus:ring-indigo-100 disabled:opacity-60"
+                className={inputClassName}
                 placeholder="tu@empresa.com"
               />
             </div>
@@ -157,53 +212,38 @@ function LoginForm() {
             <div>
               <label
                 htmlFor="password"
-                className="mb-2 block text-sm font-medium text-slate-700"
+                className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-500"
               >
                 Contraseña
               </label>
               <input
                 id="password"
                 type="password"
-                autoComplete="current-password"
+                autoComplete={isSignUp ? "new-password" : "current-password"}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 disabled={isSubmitting}
-                className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-4 focus:ring-indigo-100 disabled:opacity-60"
+                className={inputClassName}
                 placeholder="••••••••"
               />
             </div>
 
             <button
               type="submit"
-              disabled={isSubmitting || !clientEnv}
-              className="w-full rounded-xl bg-gradient-to-b from-slate-800 to-slate-950 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:from-slate-700 hover:to-slate-900 disabled:cursor-not-allowed disabled:opacity-70"
+              disabled={isSubmitting}
+              className="mt-2 w-full rounded-lg bg-gradient-to-r from-purple-600 to-violet-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_0_15px_rgba(147,51,234,0.25)] transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isSubmitting ? "Iniciando sesión…" : "Entrar"}
+              {isSubmitting
+                ? isSignUp
+                  ? "Registrando…"
+                  : "Entrando…"
+                : isSignUp
+                  ? "Crear cuenta"
+                  : "Entrar"}
             </button>
           </form>
-
-          <p className="mt-6 text-center text-xs text-slate-500">
-            ¿Eres responsable de equipo?{" "}
-            <Link href="/" className="font-medium text-indigo-600 hover:text-indigo-500">
-              Ir al panel
-            </Link>
-          </p>
         </div>
       </div>
     </div>
-  );
-}
-
-export default function LoginPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-full items-center justify-center bg-slate-50 px-6">
-          <p className="text-sm text-slate-500">Cargando acceso…</p>
-        </div>
-      }
-    >
-      <LoginForm />
-    </Suspense>
   );
 }

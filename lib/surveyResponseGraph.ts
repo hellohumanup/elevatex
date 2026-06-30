@@ -9,7 +9,7 @@ import {
 /** Fila cruda de Supabase — soporta columnas planas y arrays JSON. */
 export type SurveyResponseRow = {
   id?: string | number;
-  organization_id?: number | null;
+  organization_id?: string | null;
   responder_id: string;
   p1_voto1?: string | null;
   p1_voto2?: string | null;
@@ -62,8 +62,46 @@ export const NETWORK_LAYER_OPTIONS: Array<{
   },
 ];
 
-const SURVEY_RESPONSE_SELECT =
-  "id, organization_id, responder_id, p1_votes, p2_votes, p3_votes, p1_voto1, p1_voto2, p1_voto3, p2_voto1, p2_voto2, p2_voto3, p3_voto1, p3_voto2, p3_voto3, created_at";
+const SURVEY_RESPONSE_SELECT_SAFE =
+  "id, organization_id, responder_id, p1_voto1, p1_voto2, p1_voto3, p2_voto1, p2_voto2, p2_voto3, p3_voto1, p3_voto2, p3_voto3";
+
+const SURVEY_RESPONSE_SELECT_EXTENDED = `${SURVEY_RESPONSE_SELECT_SAFE}, p1_votes, p2_votes, p3_votes, created_at`;
+
+async function fetchSurveyRows(options?: {
+  organizationId?: string;
+}): Promise<{ data: SurveyResponseRow[]; error: string | null }> {
+  const supabase = getSupabase();
+
+  let extendedQuery = supabase
+    .from("survey_responses")
+    .select(SURVEY_RESPONSE_SELECT_EXTENDED);
+
+  if (options?.organizationId !== undefined) {
+    extendedQuery = extendedQuery.eq("organization_id", options.organizationId);
+  }
+
+  const extended = await extendedQuery.order("responder_id", { ascending: true });
+
+  if (!extended.error) {
+    return { data: (extended.data ?? []) as SurveyResponseRow[], error: null };
+  }
+
+  let safeQuery = supabase
+    .from("survey_responses")
+    .select(SURVEY_RESPONSE_SELECT_SAFE);
+
+  if (options?.organizationId !== undefined) {
+    safeQuery = safeQuery.eq("organization_id", options.organizationId);
+  }
+
+  const safe = await safeQuery.order("responder_id", { ascending: true });
+
+  if (safe.error) {
+    return { data: [], error: safe.error.message };
+  }
+
+  return { data: (safe.data ?? []) as SurveyResponseRow[], error: null };
+}
 
 function isNonEmptyVote(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -286,32 +324,25 @@ export async function fetchAllSurveyResponses(): Promise<{
   data: SurveyResponseRow[];
   error: string | null;
 }> {
-  const { data, error } = await getSupabase()
-    .from("survey_responses")
-    .select(SURVEY_RESPONSE_SELECT)
-    .order("responder_id", { ascending: true });
-
-  if (error) {
-    return { data: [], error: error.message };
-  }
-
-  return { data: (data ?? []) as SurveyResponseRow[], error: null };
+  return fetchSurveyRows();
 }
 
 export async function fetchSurveyResponsesForOrganization(
-  organizationId: number,
+  organizationId: number | string,
 ): Promise<{ data: SurveyResponseRow[]; error: string | null }> {
-  const { data, error } = await getSupabase()
-    .from("survey_responses")
-    .select(SURVEY_RESPONSE_SELECT)
-    .eq("organization_id", organizationId)
-    .order("responder_id", { ascending: true });
+  const orgId =
+    typeof organizationId === "string"
+      ? organizationId.trim()
+      : String(organizationId);
 
-  if (error) {
-    return { data: [], error: error.message };
+  if (!orgId) {
+    return {
+      data: [],
+      error: "organization_id no válido para consultar survey_responses.",
+    };
   }
 
-  return { data: (data ?? []) as SurveyResponseRow[], error: null };
+  return fetchSurveyRows({ organizationId: orgId });
 }
 
 /** Adaptador para reutilizar helpers legacy con filas del cuestionario nativo. */

@@ -1,0 +1,21 @@
+/**
+ * Shim App Router: createClientComponentClient + re-export @supabase/ssr.
+ * @supabase/auth-helpers-nextjs@0.15 consolidó APIs en @supabase/ssr.
+ */
+import { createBrowserClient } from "@supabase/ssr";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { assertSupabaseEnv } from "@/lib/supabase/env";
+
+export { createBrowserClient, createServerClient } from "@supabase/ssr";
+
+let cachedClient: SupabaseClient | undefined;
+
+/** Cliente del navegador con anon_key — inicialización síncrona, sin await. */
+export function createClientComponentClient(): SupabaseClient {
+  if (!cachedClient) {
+    const { supabaseUrl, supabaseAnonKey } = assertSupabaseEnv();
+    cachedClient = createBrowserClient(supabaseUrl, supabaseAnonKey);
+  }
+
+  return cachedClient;
+}

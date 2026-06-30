@@ -1,8 +1,9 @@
-import { getSupabase } from "@/lib/supabase";
+import { resolveOrganizationIdForInsert } from "@/lib/organizations";
 import { getDefaultOrganizationId } from "@/lib/tenant";
+import { getSupabase } from "@/lib/supabase";
 
 export type SurveyResponseRecord = {
-  organization_id: number;
+  organization_id: string;
   responder_id: string;
   p1_voto1: string;
   p1_voto2: string;
@@ -22,7 +23,7 @@ export type SurveyFormVotes = {
 };
 
 export function buildSurveyResponseRecord(input: {
-  organizationId?: number;
+  organizationId?: string;
   responderId: string;
   votes: SurveyFormVotes;
 }): SurveyResponseRecord {
@@ -47,12 +48,17 @@ export function createAnonymousResponderId(): string {
 }
 
 export async function insertSurveyResponse(record: SurveyResponseRecord) {
-  return getSupabase().from("survey_responses").insert(record);
+  const organizationId = await resolveOrganizationIdForInsert(record.organization_id);
+
+  return getSupabase().from("survey_responses").insert({
+    ...record,
+    organization_id: organizationId,
+  });
 }
 
 export async function fetchOrganizationIdForGroup(
   groupId: string,
-): Promise<number | null> {
+): Promise<string | null> {
   const { data, error } = await getSupabase()
     .from("groups")
     .select("organization_id")
@@ -63,5 +69,7 @@ export async function fetchOrganizationIdForGroup(
     return null;
   }
 
-  return data.organization_id;
+  return typeof data.organization_id === "string"
+    ? data.organization_id
+    : String(data.organization_id);
 }

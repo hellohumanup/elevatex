@@ -1,23 +1,20 @@
-import { createBrowserClient } from "@supabase/ssr";
+import { createClientComponentClient as createBrowserSupabaseClient } from "@/lib/supabase/auth-helpers-nextjs-shim";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { assertSupabaseEnv, getSupabaseEnv } from "@/lib/supabase/env";
+import { getSupabaseEnv } from "@/lib/supabase/env";
 
 export { getSupabaseEnv };
 
-let browserClient: SupabaseClient | undefined;
-
 export function createSupabaseBrowserClient() {
-  const { supabaseUrl, supabaseAnonKey } = assertSupabaseEnv();
+  return createBrowserSupabaseClient();
+}
 
-  if (!browserClient) {
-    browserClient = createBrowserClient(supabaseUrl, supabaseAnonKey);
-  }
-
-  return browserClient;
+/** @deprecated Usar createClientComponentClient desde @supabase/auth-helpers-nextjs */
+export function createClientComponentClient() {
+  return createBrowserSupabaseClient();
 }
 
 export function resetSupabaseBrowserClient() {
-  browserClient = undefined;
+  // El singleton vive en auth-helpers-nextjs-shim; no-op por compatibilidad.
 }
 
 export async function waitForBrowserSession(
