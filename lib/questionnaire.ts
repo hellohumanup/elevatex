@@ -205,6 +205,8 @@ export type SubmitQuestionnaireResponseInput = {
   questionnaireId?: string;
   answers: Record<string, string[]>;
   elevatexScores: Record<string, number>;
+  started_at?: string | null;
+  completed_at?: string | null;
 };
 
 export async function fetchQuestionnaireResponsesForGroup(
@@ -249,6 +251,8 @@ export async function submitQuestionnaireResponse(
       questionnaire_id: questionnaireId,
       answers: input.answers,
       elevatex_scores: input.elevatexScores,
+      ...(input.started_at ? { started_at: input.started_at } : {}),
+      ...(input.completed_at ? { completed_at: input.completed_at } : {}),
     })
     .select("id")
     .single();

@@ -256,21 +256,19 @@ export async function insertGroup(input: CreateGroupInput) {
     normalizeOrganizationId(input.organization_id) ??
     DEMO_DASHBOARD_ORGANIZATION_ID;
 
-  if (session?.user) {
-    try {
-      if (input.organization_id) {
-        await ensureOrganizationExists(organizationId);
-      } else {
-        organizationId = await resolveOrganizationIdForInsert(
-          DEMO_DASHBOARD_ORGANIZATION_ID,
-        );
-      }
-    } catch (error) {
-      console.error("[insertGroup] No se pudo resolver organization_id:", error);
-      organizationId =
-        normalizeOrganizationId(input.organization_id) ??
-        DEMO_DASHBOARD_ORGANIZATION_ID;
+  try {
+    if (!input.organization_id && session?.user) {
+      organizationId = await resolveOrganizationIdForInsert(
+        DEMO_DASHBOARD_ORGANIZATION_ID,
+      );
+    } else {
+      await ensureOrganizationExists(organizationId, "Organización Demo");
     }
+  } catch (error) {
+    console.error("[insertGroup] No se pudo resolver organization_id:", error);
+    organizationId =
+      normalizeOrganizationId(input.organization_id) ??
+      DEMO_DASHBOARD_ORGANIZATION_ID;
   }
 
   const managerId =

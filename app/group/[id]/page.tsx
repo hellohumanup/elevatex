@@ -11,14 +11,36 @@ import { getSupabase } from "@/lib/supabase";
 type Participant = {
   id: string;
   name: string;
+  email: string | null;
   group_id: string;
 };
 
-function parseNames(text: string): string[] {
+type ParsedParticipantRow = {
+  name: string;
+  email: string | null;
+};
+
+function parseParticipantRows(text: string): ParsedParticipantRow[] {
   return text
-    .split(/[,\n]+/)
-    .map((name) => name.trim())
-    .filter(Boolean);
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const commaIndex = line.indexOf(",");
+
+      if (commaIndex === -1) {
+        return { name: line.trim(), email: null };
+      }
+
+      const name = line.slice(0, commaIndex).trim();
+      const email = line.slice(commaIndex + 1).trim();
+
+      return {
+        name,
+        email: email.length > 0 ? email : null,
+      };
+    })
+    .filter((row) => row.name.length > 0);
 }
 
 export default function GroupPage() {
@@ -35,6 +57,15 @@ export default function GroupPage() {
   const [responseCount, setResponseCount] = useState(0);
   const [isLoadingResponses, setIsLoadingResponses] = useState(true);
   const [isSendingInvitations, setIsSendingInvitations] = useState(false);
+  const [deletingParticipantId, setDeletingParticipantId] = useState<
+    string | null
+  >(null);
+
+  const isParticipantActionDisabled =
+    isLoading ||
+    isSaving ||
+    isSendingInvitations ||
+    deletingParticipantId !== null;
 
   const fetchGroup = useCallback(async () => {
     const { data, error: fetchError } = await fetchGroupById(groupId);
@@ -65,6 +96,10 @@ export default function GroupPage() {
       (data ?? []).map((participant) => ({
         id: String(participant.id),
         name: participant.name,
+        email:
+          typeof participant.email === "string" && participant.email.trim()
+            ? participant.email.trim()
+            : null,
         group_id: String(participant.group_id),
       })),
     );
@@ -102,9 +137,9 @@ export default function GroupPage() {
   }, [fetchGroup, fetchParticipants, fetchResponseCount]);
 
   async function handleAddParticipants() {
-    const names = parseNames(namesText);
+    const rows = parseParticipantRows(namesText);
 
-    if (names.length === 0) {
+    if (rows.length === 0) {
       setError("Introduce al menos un nombre de colaborador.");
       return;
     }
@@ -115,8 +150,9 @@ export default function GroupPage() {
     const { error: insertError } = await getSupabase()
       .from("participants")
       .insert(
-        names.map((name) => ({
-          name,
+        rows.map((row) => ({
+          name: row.name,
+          email: row.email,
           group_id: toSupabaseGroupId(groupId),
         })),
       );
@@ -130,6 +166,31 @@ export default function GroupPage() {
 
     setNamesText("");
     await fetchParticipants();
+  }
+
+  async function handleDeleteParticipant(participantId: string) {
+    if (isParticipantActionDisabled) {
+      return;
+    }
+
+    setDeletingParticipantId(participantId);
+    setError(null);
+
+    const { error: deleteError } = await getSupabase()
+      .from("participants")
+      .delete()
+      .eq("id", participantId);
+
+    setDeletingParticipantId(null);
+
+    if (deleteError) {
+      setError(deleteError.message);
+      return;
+    }
+
+    setParticipants((current) =>
+      current.filter((participant) => participant.id !== participantId),
+    );
   }
 
   async function handleCopyStudentLink() {
@@ -188,8 +249,8 @@ export default function GroupPage() {
         )}
 
         <section className="rounded-xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50 shadow-sm">
-          <div className="grid gap-8 p-6 md:grid-cols-[1fr_2fr] md:items-center md:gap-10 md:p-8">
-            <div className="max-w-md shrink-0">
+          <div className="flex flex-col gap-6 p-6 md:flex-row md:items-center md:justify-between md:p-8">
+            <div className="min-w-0 flex-1 md:max-w-md md:pr-6">
               <h2 className="text-lg font-semibold tracking-tight text-amber-900">
                 Dinámica de Equipo
               </h2>
@@ -199,7 +260,7 @@ export default function GroupPage() {
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center justify-start gap-4 md:flex-nowrap md:justify-end">
+            <div className="flex w-full shrink-0 flex-wrap items-center gap-3 md:w-auto md:justify-end">
               <button
                 type="button"
                 onClick={handleSendInvitations}
@@ -236,13 +297,13 @@ export default function GroupPage() {
                   Ver Resultados
                 </Link>
               ) : (
-                <div
-                  className="inline-flex h-14 min-h-14 max-w-xs shrink-0 items-center rounded-xl border border-indigo-200 bg-indigo-50/90 px-5 text-sm font-medium leading-snug text-indigo-800"
+                <span
+                  className="inline-flex h-14 min-h-14 shrink-0 cursor-not-allowed items-center justify-center rounded-xl border border-slate-200 bg-slate-50 px-5 text-sm font-semibold text-slate-400"
                   role="status"
+                  aria-disabled="true"
                 >
-                  Esperando a que los colaboradores respondan la encuesta para
-                  generar el reporte de ElevateX.
-                </div>
+                  Pendiente de Respuestas
+                </span>
               )}
             </div>
           </div>
@@ -253,15 +314,18 @@ export default function GroupPage() {
             Añadir colaboradores
           </h2>
           <p className="mt-1 text-sm text-slate-500">
-            Pega aquí los nombres de los colaboradores separados por comas o
-            saltos de línea.
+            Pega un colaborador por línea en formato{" "}
+            <span className="font-medium text-slate-700">Nombre, email</span>.
+            Si omites el correo, se guardará solo el nombre.
           </p>
 
           <textarea
             value={namesText}
             onChange={(event) => setNamesText(event.target.value)}
             rows={6}
-            placeholder={"Ana Martínez, Luis Fernández\nCarla Ruiz"}
+            placeholder={
+              "Ana Martínez, ana@empresa.com\nLuis Fernández, luis@empresa.com"
+            }
             className="mt-4 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
           />
 
@@ -299,18 +363,33 @@ export default function GroupPage() {
                   >
                     Nombre
                   </th>
+                  <th
+                    scope="col"
+                    className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500"
+                  >
+                    Correo Electrónico
+                  </th>
+                  <th scope="col" className="px-6 py-3">
+                    <span className="sr-only">Acciones</span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 bg-white">
                 {isLoading ? (
                   <tr>
-                    <td className="px-6 py-12 text-center text-sm text-slate-500">
+                    <td
+                      colSpan={3}
+                      className="px-6 py-12 text-center text-sm text-slate-500"
+                    >
                       Cargando colaboradores…
                     </td>
                   </tr>
                 ) : participants.length === 0 ? (
                   <tr>
-                    <td className="px-6 py-12 text-center text-sm text-slate-500">
+                    <td
+                      colSpan={3}
+                      className="px-6 py-12 text-center text-sm text-slate-500"
+                    >
                       Aún no hay colaboradores en este equipo.
                     </td>
                   </tr>
@@ -319,6 +398,23 @@ export default function GroupPage() {
                     <tr key={participant.id} className="hover:bg-slate-50">
                       <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-900">
                         {participant.name}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-600">
+                        {participant.email || "Sin correo"}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-right">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDeleteParticipant(participant.id)
+                          }
+                          disabled={isParticipantActionDisabled}
+                          className="text-xs font-medium text-red-600 transition-colors hover:text-red-800 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {deletingParticipantId === participant.id
+                            ? "Eliminando…"
+                            : "Eliminar"}
+                        </button>
                       </td>
                     </tr>
                   ))

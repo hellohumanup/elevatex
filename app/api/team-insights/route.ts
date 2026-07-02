@@ -1,33 +1,28 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
+import {
+  buildGraphLinksFromResponses,
+  calculateIndegree,
+  calculateNetworkDensity,
+  calculateReciprocity,
+  detectNetworkSilos,
+  normalizeParticipantId,
+  type NetworkDensity,
+  type NetworkSilo,
+} from "@/lib/mathEngine";
 
 export const dynamic = "force-dynamic";
 
-/** Tipos alineados con lib/mathEngine.ts (definidos aquí para evitar acoplamiento en el bundle del API route). */
+/** Tipos alineados con lib/mathEngine.ts para métricas enviadas desde el cliente. */
 type IndegreeMap = Readonly<Record<string, number>>;
 
 type ReciprocityMap = Readonly<Record<string, number>>;
-
-type NetworkDensity = {
-  nodeCount: number;
-  linkCount: number;
-  maxPossibleLinks: number;
-  density: number;
-  densityPercent: number;
-};
-
-type NetworkSilo = {
-  id: string;
-  memberIds: string[];
-  memberNames: string[];
-  size: number;
-};
 
 const SYSTEM_PROMPT =
   "Eres un consultor experto en People Analytics y Organizational Network Analysis (ONA). Vas a recibir métricas de un equipo. Tu objetivo es redactar un análisis ejecutivo breve (2-3 párrafos) destacando la cohesión del equipo, posibles líderes ocultos y riesgos de silos o desconexión, usando un tono profesional y orientado a negocio.";
 
 const INDIVIDUAL_SYSTEM_PROMPT =
-  "Eres un Coach Ejecutivo y experto en People Analytics. Analiza el perfil de este colaborador basándote en sus métricas ONA individuales que te pasará el usuario (nominaciones de liderazgo/indegree, conexiones mutuas/reciprocity y silo al que pertenece). Redacta un diagnóstico individual potente de exactamente 2 párrafos enfocado en sus fortalezas informales y añade 2 recomendaciones accionables y directas para que el manager sepa cómo gestionarlo y potenciarlo.";
+  "Eres un Coach Ejecutivo y experto en People Analytics y Organizational Network Analysis (ONA). Recibirás métricas cuantitativas calculadas por el motor matemático del equipo (indegree, reciprocidad y densidad de red) junto con el contexto cualitativo del colaborador. Cruza las respuestas cualitativas de texto con las métricas cuantitativas de ONA provistas. Si el Indegree es alto, analízalo como líder informal. Si la reciprocidad es baja, evalúa posibles brechas de comunicación en su entorno. Genera un diagnóstico ejecutivo y accionable para RR.HH. Redacta exactamente 2 párrafos de fortalezas informales y añade 2 recomendaciones accionables numeradas para el manager.";
 
 type ParticipantRef = {
   id: string;
@@ -47,10 +42,20 @@ type TeamInsightsRequest = {
 type IndividualInsightsRequest = {
   mode: "individual";
   groupName?: string;
+  participantId?: string;
   participantName: string;
   participantIndegree: number;
   participantReciprocity: number;
   participantSilo: string;
+  networkDensityPercent: number;
+  participants?: ParticipantRef[];
+  responses?: SurveyResponseRef[];
+  participantAnswers?: unknown;
+};
+
+type SurveyResponseRef = {
+  participant_id: string | null;
+  answers: unknown;
 };
 
 type InsightsRequest = TeamInsightsRequest | IndividualInsightsRequest;
@@ -247,6 +252,130 @@ function parseTeamInsightsRequest(
   };
 }
 
+function parseSurveyResponses(value: unknown): SurveyResponseRef[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const responses: SurveyResponseRef[] = [];
+
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+
+    const participantId =
+      item.participant_id === null || item.participant_id === undefined
+        ? null
+        : String(item.participant_id).trim() || null;
+
+    responses.push({
+      participant_id: participantId,
+      answers: item.answers,
+    });
+  }
+
+  return responses.length > 0 ? responses : undefined;
+}
+
+function resolveParticipantSiloLabel(
+  participantId: string,
+  silos: NetworkSilo[],
+): string {
+  const normalizedId = normalizeParticipantId(participantId);
+  const silo = silos.find((candidate) =>
+    candidate.memberIds.some(
+      (memberId) => normalizeParticipantId(memberId) === normalizedId,
+    ),
+  );
+
+  if (!silo) {
+    return DEFAULT_INDIVIDUAL_SILO;
+  }
+
+  return `Silo ${silo.id.toUpperCase()} (${silo.size} miembros)`;
+}
+
+function enrichIndividualMetricsFromMathEngine(
+  payload: IndividualInsightsRequest,
+): IndividualInsightsRequest {
+  if (
+    !payload.participantId ||
+    !payload.participants?.length ||
+    !payload.responses?.length
+  ) {
+    return payload;
+  }
+
+  const links = buildGraphLinksFromResponses(
+    payload.participants,
+    payload.responses,
+  );
+  const indegree = calculateIndegree(links);
+  const reciprocity = calculateReciprocity(links);
+  const density = calculateNetworkDensity(payload.participants.length, links);
+  const silos = detectNetworkSilos(payload.participants, links);
+  const normalizedParticipantId = normalizeParticipantId(payload.participantId);
+
+  const participantResponse = payload.responses.find(
+    (response) =>
+      response.participant_id !== null &&
+      normalizeParticipantId(String(response.participant_id)) ===
+        normalizedParticipantId,
+  );
+
+  return {
+    ...payload,
+    participantIndegree:
+      indegree[normalizedParticipantId] ?? payload.participantIndegree,
+    participantReciprocity:
+      reciprocity[normalizedParticipantId] ?? payload.participantReciprocity,
+    networkDensityPercent: density.densityPercent,
+    participantSilo: resolveParticipantSiloLabel(normalizedParticipantId, silos),
+    participantAnswers:
+      participantResponse?.answers ?? payload.participantAnswers,
+  };
+}
+
+function formatParticipantQualitativeContext(
+  answers: unknown,
+  nameById: Map<string, string>,
+): string {
+  if (!isRecord(answers)) {
+    return "Sin respuestas cualitativas registradas para este colaborador.";
+  }
+
+  const lines: string[] = [];
+
+  if (Array.isArray(answers.influencia)) {
+    const names = answers.influencia
+      .map((value) => nameById.get(String(value)) ?? String(value))
+      .filter(Boolean);
+    lines.push(
+      `Nominaciones de influencia (respuesta propia): ${
+        names.length > 0 ? names.join(", ") : "ninguna"
+      }`,
+    );
+  }
+
+  if (Array.isArray(answers.comunicacion)) {
+    const names = answers.comunicacion
+      .map((value) => nameById.get(String(value)) ?? String(value))
+      .filter(Boolean);
+    lines.push(
+      `Nominaciones de comunicación frecuente (respuesta propia): ${
+        names.length > 0 ? names.join(", ") : "ninguna"
+      }`,
+    );
+  }
+
+  if (lines.length === 0) {
+    return "Sin nominaciones ONA registradas en la respuesta del colaborador.";
+  }
+
+  return lines.join("\n");
+}
+
 function parseIndividualInsightsRequest(
   body: Record<string, unknown>,
 ): IndividualInsightsRequest | null {
@@ -256,20 +385,30 @@ function parseIndividualInsightsRequest(
     return null;
   }
 
+  const participantId = safeParseString(body.participantId);
   const participantIndegree = safeParseNumber(body.participantIndegree, 0);
   const participantReciprocity = safeParseNumber(body.participantReciprocity, 0);
   const participantSilo =
     safeParseString(body.participantSilo) || DEFAULT_INDIVIDUAL_SILO;
-
   const groupName = safeParseString(body.groupName);
+
+  const densityFromBody = parseNetworkDensity(body.density);
+  const networkDensityPercent =
+    densityFromBody?.densityPercent ??
+    safeParseNumber(body.networkDensityPercent, 0);
 
   return {
     mode: "individual",
     groupName: groupName.length > 0 ? groupName : undefined,
+    participantId: participantId.length > 0 ? participantId : undefined,
     participantName,
     participantIndegree,
     participantReciprocity,
     participantSilo,
+    networkDensityPercent,
+    participants: parseParticipants(body.participants),
+    responses: parseSurveyResponses(body.responses),
+    participantAnswers: body.participantAnswers,
   };
 }
 
@@ -371,18 +510,33 @@ Instrucciones de salida:
 
 function buildIndividualUserPrompt(payload: IndividualInsightsRequest): string {
   const teamLabel = payload.groupName ?? "Equipo sin nombre";
+  const nameById = buildNameById(payload.participants);
+  const networkDensity = Math.round(payload.networkDensityPercent * 10) / 10;
 
   return `Colaborador: ${payload.participantName}
 Equipo: ${teamLabel}
+Silo de pertenencia: ${payload.participantSilo}
 
-Métricas ONA individuales:
-- Nominaciones de liderazgo recibidas (indegree): ${payload.participantIndegree}
-- Conexiones mutuas (reciprocity): ${payload.participantReciprocity}
-- Silo de pertenencia: ${payload.participantSilo}
+--- METRICAS MATEMÁTICAS ONA DEL COLABORADOR ---
+
+Votos entrantes (Indegree): ${payload.participantIndegree}
+
+Conexiones mutuas (Reciprocidad): ${payload.participantReciprocity}
+
+Densidad global del equipo: ${networkDensity}%
+
+--- CONTEXTO CUALITATIVO DEL COLABORADOR ---
+${formatParticipantQualitativeContext(payload.participantAnswers, nameById)}
+
+Instrucciones de análisis:
+- Cruza las respuestas cualitativas de texto con las métricas cuantitativas de ONA provistas.
+- Si el Indegree es alto, analízalo como líder informal.
+- Si la reciprocidad es baja, evalúa posibles brechas de comunicación en su entorno.
+- Genera un diagnóstico ejecutivo y accionable para RR.HH.
 
 Instrucciones de salida:
 - Responde únicamente con el diagnóstico en español.
-- Exactamente 2 párrafos de fortalezas informales.
+- Exactamente 2 párrafos de fortalezas informales basados en el cruce cualitativo-cuantitativo.
 - Incluye 2 recomendaciones accionables numeradas para el manager al final.
 - Tono de coach ejecutivo, profesional y orientado a la acción.`;
 }
@@ -449,11 +603,16 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Cuerpo inválido. Modo group: { mode: 'group', indegree, reciprocity, density, silos? }. Modo individual: { mode: 'individual', participantName, participantIndegree?, participantReciprocity?, participantSilo? }.",
+            "Cuerpo inválido. Modo group: { mode: 'group', indegree, reciprocity, density, silos? }. Modo individual: { mode: 'individual', participantName, participantId?, participantIndegree?, participantReciprocity?, participantSilo?, density?, participants?, responses? }.",
         },
         { status: 400 },
       );
     }
+
+    const resolvedPayload =
+      payload.mode === "individual"
+        ? enrichIndividualMetricsFromMathEngine(payload)
+        : payload;
 
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json(
@@ -466,7 +625,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const insight = await generateInsight(payload);
+    const insight = await generateInsight(resolvedPayload);
 
     return NextResponse.json({ insight } satisfies TeamInsightsResponse);
   } catch (error) {

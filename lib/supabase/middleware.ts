@@ -55,7 +55,7 @@ export async function updateSession(request: NextRequest) {
       (pathname === "/login" || pathname.startsWith("/login/"))
     ) {
       const redirectUrl = request.nextUrl.clone();
-      redirectUrl.pathname = "/cuestionario";
+      redirectUrl.pathname = "/admin/surveys";
       redirectUrl.search = "";
 
       const redirectResponse = NextResponse.redirect(redirectUrl);

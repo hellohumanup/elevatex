@@ -1,333 +1,720 @@
 "use client";
 
-import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useState } from "react";
 import {
-  DEMO_DASHBOARD_ORGANIZATION_ID,
-  fetchGroupsWithParticipantCounts,
-  insertGroup,
-  type GroupWithParticipantCount,
-} from "@/lib/groups";
+  ArrowRight,
+  ArrowUpRight,
+  BatteryWarning,
+  Building,
+  ChevronRight,
+  Compass,
+  Database,
+  Layers,
+  LineChart,
+  Mail,
+  Menu,
+  MessageSquareOff,
+  Rocket,
+  Search,
+  Target,
+  TrendingDown,
+  User,
+  UserX,
+  Users,
+  Workflow,
+  X,
+  Zap,
+} from "lucide-react";
+import Link from "next/link";
+import { FormEvent, useState } from "react";
 
-type Group = GroupWithParticipantCount;
+const navLinks = [
+  { href: "#problema", label: "Problema" },
+  { href: "#servicios", label: "Servicios" },
+  { href: "#metodologia", label: "Metodología" },
+];
 
-function formatParticipantLabel(count: number): string {
-  if (count === 0) {
-    return "Sin colaboradores aún";
-  }
+type ContactFormState = {
+  name: string;
+  company: string;
+  email: string;
+  challenge: string;
+};
 
-  return count === 1
-    ? "1 Colaborador añadido"
-    : `${count} Colaboradores añadidos`;
-}
+export default function HomePage() {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [waitlistEmail, setWaitlistEmail] = useState("");
+  const [waitlistStatus, setWaitlistStatus] = useState<
+    "idle" | "success" | "error"
+  >("idle");
 
-export default function Home() {
-  const [groups, setGroups] = useState<Group[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [name, setName] = useState("");
-  const [ageBand, setAgeBand] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [contactForm, setContactForm] = useState<ContactFormState>({
+    name: "",
+    company: "",
+    email: "",
+    challenge: "",
+  });
+  const [contactStatus, setContactStatus] = useState<
+    "idle" | "submitting" | "success" | "error"
+  >("idle");
 
-  const fetchGroups = useCallback(async () => {
-    setError(null);
-
-    const { data, error: fetchError } = await fetchGroupsWithParticipantCounts(
-      DEMO_DASHBOARD_ORGANIZATION_ID,
-    );
-
-    if (fetchError) {
-      setError(fetchError.message);
-      return;
-    }
-
-    setGroups(data);
-  }, []);
-
-  useEffect(() => {
-    async function loadGroups() {
-      setIsLoading(true);
-      await fetchGroups();
-      setIsLoading(false);
-    }
-
-    loadGroups();
-  }, [fetchGroups]);
-
-  function openForm() {
-    setName("");
-    setAgeBand("");
-    setError(null);
-    setShowForm(true);
-  }
-
-  function closeForm() {
-    setShowForm(false);
-    setName("");
-    setAgeBand("");
-  }
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleWaitlistSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!name.trim() || !ageBand.trim()) {
-      setError("Completa todos los campos.");
+    if (!waitlistEmail.trim()) {
+      setWaitlistStatus("error");
       return;
     }
 
-    setIsSaving(true);
-    setError(null);
+    setWaitlistStatus("success");
+    setWaitlistEmail("");
+  }
 
-    const { data: createdGroup, error: insertError } = await insertGroup({
-      name: name.trim(),
-      age_band: ageBand.trim(),
-      organization_id: DEMO_DASHBOARD_ORGANIZATION_ID,
-    });
+  function handleContactSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
 
-    setIsSaving(false);
-
-    if (insertError) {
-      const message =
-        typeof insertError.message === "string" && insertError.message.length > 0
-          ? insertError.message
-          : "No se pudo crear el equipo. Revisa la consola del navegador.";
-      console.error("[Home] Error al crear equipo:", insertError);
-      setError(message);
+    if (
+      !contactForm.name.trim() ||
+      !contactForm.company.trim() ||
+      !contactForm.email.trim() ||
+      !contactForm.challenge.trim()
+    ) {
+      setContactStatus("error");
       return;
     }
 
-    if (!createdGroup) {
-      console.error(
-        "[Home] insertGroup terminó sin error pero sin createdGroup.",
-      );
-      setError(
-        "No se pudo confirmar la creación del equipo. Revisa la consola y las políticas RLS.",
-      );
-      return;
-    }
+    setContactStatus("submitting");
 
-    console.log("[Home] Equipo guardado en Supabase:", createdGroup);
-
-    const newGroup: Group = {
-      ...createdGroup,
-      participant_count: 0,
-    };
-
-    setGroups((current) => [newGroup, ...current]);
-    closeForm();
-    await fetchGroups();
+    setTimeout(() => {
+      setContactStatus("success");
+      setContactForm({
+        name: "",
+        company: "",
+        email: "",
+        challenge: "",
+      });
+    }, 800);
   }
 
   return (
-    <div className="min-h-full bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-6 py-6 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">
-              Vínculo HR · Multi-equipo
-            </p>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">
-              Dashboard de Equipos
-            </h1>
-            <p className="mt-1 text-sm text-slate-500">
-              Vista corporativa de equipos activos en tu organización.
-            </p>
+    <main className="scroll-smooth min-h-screen bg-slate-950 text-slate-50">
+      <div className="fixed inset-x-0 top-0 z-50 border-b border-white/10 bg-slate-950/70 backdrop-blur-xl">
+        <nav className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
+          <a
+            href="#top"
+            onClick={() => setIsMenuOpen(false)}
+            className="text-sm font-bold uppercase tracking-[0.2em] text-slate-50 transition-opacity duration-300 hover:opacity-90"
+          >
+            ELEVATEX
+          </a>
+
+          <div className="hidden items-center gap-8 md:flex">
+            {navLinks.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                className="text-sm font-medium text-slate-300 transition-colors duration-300 hover:text-cyan-300"
+              >
+                {link.label}
+              </a>
+            ))}
           </div>
-          <div className="flex shrink-0 items-center gap-3">
+
+          <div className="flex items-center gap-3">
             <Link
-              href="/admin"
-              className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+              href="/login"
+              className="hidden items-center justify-center rounded-full border border-slate-700 bg-transparent px-4 py-2.5 text-sm font-semibold text-slate-100 transition-all duration-300 hover:scale-105 hover:bg-slate-800 md:inline-flex"
             >
-              ONA · Admin
+              Acceso Clientes
             </Link>
+
+            <a
+              href="#contacto"
+              className="hidden items-center justify-center rounded-full bg-white px-4 py-2.5 text-sm font-semibold text-slate-950 transition-all duration-300 hover:scale-105 hover:bg-slate-100 md:inline-flex"
+            >
+              Hablemos
+            </a>
+
             <button
               type="button"
-              onClick={openForm}
-              className="inline-flex items-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+              onClick={() => setIsMenuOpen((open) => !open)}
+              className="inline-flex items-center justify-center rounded-lg p-2 text-slate-200 transition-colors hover:bg-white/10 md:hidden"
+              aria-label={isMenuOpen ? "Cerrar menú" : "Abrir menú"}
+              aria-expanded={isMenuOpen}
             >
-              Crear Nuevo Equipo
+              {isMenuOpen ? (
+                <X className="h-6 w-6" />
+              ) : (
+                <Menu className="h-6 w-6" />
+              )}
             </button>
           </div>
-        </div>
-      </header>
+        </nav>
 
-      <main className="mx-auto max-w-6xl px-6 py-10">
-        {error && !showForm && (
-          <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {error}
+        {isMenuOpen && (
+          <div className="border-t border-white/5 bg-slate-950/95 backdrop-blur-xl md:hidden">
+            <div className="mx-auto max-w-7xl px-4 py-2 sm:px-6">
+              {navLinks.map((link) => (
+                <a
+                  key={link.href}
+                  href={link.href}
+                  onClick={() => setIsMenuOpen(false)}
+                  className="block border-b border-white/5 py-5 text-center text-lg font-medium text-slate-200 transition-colors hover:text-cyan-300"
+                >
+                  {link.label}
+                </a>
+              ))}
+              <Link
+                href="/login"
+                onClick={() => setIsMenuOpen(false)}
+                className="block border-b border-white/5 py-5 text-center text-lg font-medium text-slate-200 transition-colors hover:text-cyan-300"
+              >
+                Acceso Clientes
+              </Link>
+              <a
+                href="#contacto"
+                onClick={() => setIsMenuOpen(false)}
+                className="block py-5 text-center text-lg font-semibold text-cyan-400 transition-colors hover:text-cyan-300"
+              >
+                Hablemos
+              </a>
+            </div>
           </div>
         )}
+      </div>
 
-        <section>
-          <div className="mb-6 flex items-end justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900">
-                Equipos de la organización
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">
-                Accede al sociograma y al informe de clima con IA de cada equipo.
-              </p>
-            </div>
-            {!isLoading && (
-              <span className="hidden rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 sm:inline-flex">
-                {groups.length}{" "}
-                {groups.length === 1 ? "equipo activo" : "equipos activos"}
-              </span>
-            )}
+      <section id="top" className="relative overflow-hidden">
+        <div className="absolute left-1/2 top-24 h-80 w-80 -translate-x-[130%] rounded-full bg-blue-600/20 blur-[120px]" />
+        <div className="absolute right-0 top-28 h-96 w-96 -translate-x-1/4 rounded-full bg-cyan-500/20 blur-[120px]" />
+
+        <div className="relative mx-auto flex min-h-screen max-w-7xl flex-col items-center justify-center px-4 pb-20 pt-32 text-center sm:px-6 lg:px-8">
+          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-200 backdrop-blur-xl">
+            <Compass className="h-4 w-4 text-cyan-400" />
+            <span>
+              Consultoría de liderazgo y talento de alto rendimiento
+            </span>
           </div>
 
-          {isLoading ? (
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-              {Array.from({ length: 3 }).map((_, index) => (
-                <div
-                  key={index}
-                  className="h-52 animate-pulse rounded-xl border border-slate-200 bg-white shadow-sm"
-                />
-              ))}
-            </div>
-          ) : groups.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center shadow-sm">
-              <p className="text-base font-medium text-slate-700">
-                Aún no hay equipos en esta organización.
+          <h1 className="mt-8 max-w-5xl text-balance text-4xl font-semibold tracking-tight text-slate-50 sm:text-5xl md:text-7xl">
+            <span className="block">Estrategias exponenciales.</span>
+            <span className="mt-2 block">Ejecución impecable.</span>
+            <span className="mt-2 block bg-gradient-to-r from-blue-500 to-cyan-400 bg-clip-text text-transparent">
+              Transformación audaz.
+            </span>
+          </h1>
+
+          <p className="mt-6 max-w-2xl text-pretty text-base leading-8 text-slate-400 sm:text-lg">
+            Ayudamos a empresas y a sus líderes a convertir el potencial de sus
+            equipos en resultados medibles. Sin humo: método, criterio y el
+            factor X que marca la diferencia.
+          </p>
+
+          <div className="mt-10 flex w-full flex-col items-stretch justify-center gap-4 md:flex-row md:items-center">
+            <a
+              href="#contacto"
+              className="group inline-flex w-full items-center justify-center gap-2 rounded-full bg-gradient-to-r from-blue-600 to-cyan-400 px-6 py-3.5 text-sm font-semibold text-white shadow-[0_0_40px_rgba(8,145,178,0.24)] transition-all duration-300 hover:scale-105 hover:shadow-[0_0_50px_rgba(34,211,238,0.28)] md:w-auto"
+            >
+              <span>Diseñemos tu salto exponencial</span>
+              <ChevronRight className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-1" />
+            </a>
+
+            <a
+              href="#metodologia"
+              className="inline-flex w-full items-center justify-center rounded-full border border-slate-700 bg-transparent px-6 py-3.5 text-sm font-semibold text-slate-100 transition-all duration-300 hover:scale-105 hover:bg-slate-800 md:w-auto"
+            >
+              Ver cómo trabajamos
+            </a>
+          </div>
+
+          <div className="mt-14 grid w-full max-w-4xl grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-5 backdrop-blur-sm">
+              <Layers className="h-5 w-5 text-blue-400" />
+              <p className="mt-3 text-sm font-medium text-slate-200">
+                Diagnóstico con criterio estratégico
               </p>
-              <p className="mt-2 text-sm text-slate-500">
-                Pulsa &quot;Crear Nuevo Equipo&quot; para registrar el primero.
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-5 backdrop-blur-sm">
+              <Zap className="h-5 w-5 text-cyan-400" />
+              <p className="mt-3 text-sm font-medium text-slate-200">
+                Aceleración de liderazgo y cultura
               </p>
-              <button
-                type="button"
-                onClick={openForm}
-                className="mt-6 inline-flex items-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-indigo-500"
-              >
-                Crear Nuevo Equipo
-              </button>
             </div>
-          ) : (
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-              {groups.map((group) => (
-                <article
-                  key={group.id}
-                  className="flex flex-col rounded-xl border border-slate-200 bg-white p-6 shadow-sm transition-shadow hover:shadow-md"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <h3 className="text-lg font-semibold text-slate-900">
-                      {group.name}
-                    </h3>
-                    <span className="inline-flex shrink-0 rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-100">
-                      {group.age_band}
-                    </span>
-                  </div>
-
-                  <div className="mt-4 flex items-center gap-2">
-                    <span
-                      className={`inline-flex h-2.5 w-2.5 rounded-full ${
-                        group.participant_count > 0
-                          ? "bg-emerald-500"
-                          : "bg-amber-400"
-                      }`}
-                      aria-hidden
-                    />
-                    <p className="text-sm text-slate-600">
-                      {formatParticipantLabel(group.participant_count)}
-                    </p>
-                  </div>
-
-                  <div className="mt-auto pt-6">
-                    <Link
-                      href={`/group/${group.id}/resultados`}
-                      className="inline-flex w-full items-center justify-center rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-800 shadow-sm transition-colors hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700"
-                    >
-                      Ver Sociograma y Reporte IA
-                    </Link>
-                  </div>
-                </article>
-              ))}
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-5 backdrop-blur-sm">
+              <Compass className="h-5 w-5 text-sky-300" />
+              <p className="mt-3 text-sm font-medium text-slate-200">
+                Decisiones claras para crecimiento real
+              </p>
             </div>
-          )}
-        </section>
-      </main>
-
-      {showForm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
-          onClick={closeForm}
-        >
-          <div
-            className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="mb-5 flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-slate-900">
-                Nuevo Equipo
-              </h3>
-              <button
-                type="button"
-                onClick={closeForm}
-                className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-                aria-label="Cerrar"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label
-                  htmlFor="group-name"
-                  className="mb-1.5 block text-sm font-medium text-slate-700"
-                >
-                  Nombre del equipo
-                </label>
-                <input
-                  id="group-name"
-                  type="text"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Ej. Equipo de Desarrollo"
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                  autoFocus
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="age-band"
-                  className="mb-1.5 block text-sm font-medium text-slate-700"
-                >
-                  Banda de edad / departamento
-                </label>
-                <input
-                  id="age-band"
-                  type="text"
-                  value={ageBand}
-                  onChange={(event) => setAgeBand(event.target.value)}
-                  placeholder="Ej. 25-35 · Producto"
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                />
-              </div>
-
-              {error && <p className="text-sm text-red-600">{error}</p>}
-
-              <div className="flex justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closeForm}
-                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSaving}
-                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isSaving ? "Guardando…" : "Guardar"}
-                </button>
-              </div>
-            </form>
           </div>
         </div>
-      )}
-    </div>
+      </section>
+
+      <section
+        id="problema"
+        className="relative border-t border-white/5 bg-slate-950 py-32"
+      >
+        <div className="mx-auto max-w-3xl px-6 text-center">
+          <p className="text-sm font-semibold tracking-wider text-cyan-400">
+            EL DIAGNÓSTICO
+          </p>
+          <h2 className="mt-4 text-balance text-4xl font-semibold tracking-tight text-slate-50 sm:text-5xl">
+            La mayoría de las empresas no tienen un problema de talento. Tienen
+            un problema de sistema.
+          </h2>
+          <p className="mt-6 text-lg leading-8 text-slate-400">
+            Contratan bien y aun así pierden a su mejor gente. Ascienden a sus
+            mejores profesionales y los convierten en jefes desbordados.
+            Invierten en formación que no cambia nada. El talento está; lo que
+            falta es un sistema que lo convierta en rendimiento sostenido. Así
+            es como se escapa el valor:
+          </p>
+        </div>
+
+        <div className="mx-auto mt-16 grid max-w-5xl grid-cols-1 gap-6 px-6 md:grid-cols-2">
+          <article className="rounded-3xl border border-white/5 bg-slate-900/40 p-7 transition-all duration-300 hover:-translate-y-1 hover:border-blue-500/30">
+            <BatteryWarning className="h-6 w-6 text-blue-400" />
+            <h3 className="mt-5 text-xl font-semibold text-slate-50">
+              Líderes desbordados
+            </h3>
+            <p className="mt-3 text-base leading-7 text-slate-400">
+              Un liderazgo que no gestiona el contexto organizativo, generando
+              incertidumbre, cuellos de botella y burnout crónico.
+            </p>
+          </article>
+
+          <article className="rounded-3xl border border-white/5 bg-slate-900/40 p-7 transition-all duration-300 hover:-translate-y-1 hover:border-blue-500/30">
+            <UserX className="h-6 w-6 text-cyan-400" />
+            <h3 className="mt-5 text-xl font-semibold text-slate-50">
+              Desconexión del talento
+            </h3>
+            <p className="mt-3 text-base leading-7 text-slate-400">
+              Falta de adaptación a las realidades de las personas, lo que
+              dispara la rotación silenciosa, el absentismo y la pérdida de
+              compromiso.
+            </p>
+          </article>
+
+          <article className="rounded-3xl border border-white/5 bg-slate-900/40 p-7 transition-all duration-300 hover:-translate-y-1 hover:border-blue-500/30">
+            <MessageSquareOff className="h-6 w-6 text-slate-300" />
+            <h3 className="mt-5 text-xl font-semibold text-slate-50">
+              Normalización del bajo rendimiento
+            </h3>
+            <p className="mt-3 text-base leading-7 text-slate-400">
+              Ausencia de sistemas de feedback efectivo y conversaciones
+              difíciles, lo que congela el desarrollo y frustra a los que sí
+              rinden.
+            </p>
+          </article>
+
+          <article className="rounded-3xl border border-white/5 bg-slate-900/40 p-7 transition-all duration-300 hover:-translate-y-1 hover:border-blue-500/30">
+            <TrendingDown className="h-6 w-6 text-violet-400" />
+            <h3 className="mt-5 text-xl font-semibold text-slate-50">
+              Pérdida de impacto
+            </h3>
+            <p className="mt-3 text-base leading-7 text-slate-400">
+              Desconexión entre el liderazgo y los resultados operativos,
+              erosionando de forma invisible la productividad, el clima y la
+              rentabilidad.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="propuesta" className="relative bg-slate-950 py-32">
+        <div className="mx-auto max-w-3xl px-6 text-center">
+          <h2 className="text-balance text-4xl font-bold tracking-tight text-slate-50 sm:text-5xl">
+            Qué nos hace distintos
+          </h2>
+          <div className="mx-auto mt-6 h-0.5 w-1/5 rounded-full bg-gradient-to-r from-blue-600 to-cyan-400" />
+        </div>
+
+        <div className="mx-auto mt-20 grid max-w-7xl grid-cols-1 gap-12 px-6 md:grid-cols-3">
+          <article className="border-l border-blue-500/30 pl-6 opacity-80 transition-opacity duration-300 hover:opacity-100">
+            <LineChart className="mb-6 h-10 w-10 text-blue-400" />
+            <h3 className="mb-4 text-xl font-semibold text-slate-100">
+              Rigor, no recetas
+            </h3>
+            <p className="leading-relaxed text-slate-400">
+              Trabajamos con diagnóstico, datos y un marco probado, no con
+              frases motivadoras. Cada decisión se puede justificar y medir.
+            </p>
+          </article>
+
+          <article className="border-l border-cyan-500/30 pl-6 opacity-80 transition-opacity duration-300 hover:opacity-100">
+            <Workflow className="mb-6 h-10 w-10 text-cyan-400" />
+            <h3 className="mb-4 text-xl font-semibold text-slate-100">
+              Del diseño a la ejecución
+            </h3>
+            <p className="leading-relaxed text-slate-400">
+              No entregamos un PowerPoint y nos vamos. Acompañamos la
+              implementación hasta que el cambio se nota en los resultados
+              reales y en el clima.
+            </p>
+          </article>
+
+          <article className="border-l border-violet-500/30 pl-6 opacity-80 transition-opacity duration-300 hover:opacity-100">
+            <Zap className="mb-6 h-10 w-10 text-violet-400" />
+            <h3 className="mb-4 text-xl font-semibold text-slate-100">
+              El factor X
+            </h3>
+            <p className="leading-relaxed text-slate-400">
+              Combinamos la experiencia de años trabajando el alto rendimiento
+              con una energía nueva y una mirada vanguardista. Familiar y fresco
+              a la vez.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="servicios"
+        className="relative border-t border-white/5 bg-slate-950 py-32"
+      >
+        <div className="mx-auto max-w-3xl px-6 text-center">
+          <h2 className="text-balance text-4xl font-bold tracking-tight text-slate-50 sm:text-5xl">
+            Cómo trabajamos contigo
+          </h2>
+          <p className="mt-6 text-lg leading-8 text-slate-400">
+            Tres líneas de servicio que se combinan según tu momento. Empezamos
+            por donde más duele y escalamos desde ahí.
+          </p>
+        </div>
+
+        <div className="mx-auto mt-16 grid max-w-7xl grid-cols-1 gap-8 px-6 md:grid-cols-3">
+          <article className="rounded-2xl border border-white/5 bg-slate-900/30 p-8 transition-all duration-300 hover:-translate-y-2 hover:border-cyan-500/50 hover:bg-slate-900/60">
+            <div className="mb-6 inline-flex rounded-lg bg-blue-400/10 p-3">
+              <Search className="h-6 w-6 text-blue-400" />
+            </div>
+            <h3 className="mb-4 text-xl font-bold text-slate-100">
+              Diagnóstico y Transformación
+            </h3>
+            <p className="text-slate-400">
+              Auditamos cómo tu organización atrae, desarrolla y retiene el
+              talento, y rediseñamos el sistema para que rinda. Ideal si sientes
+              que pierdes gente o energía sin saber exactamente por qué.
+            </p>
+          </article>
+
+          <article className="rounded-2xl border border-white/5 bg-slate-900/30 p-8 transition-all duration-300 hover:-translate-y-2 hover:border-cyan-500/50 hover:bg-slate-900/60">
+            <div className="mb-6 inline-flex rounded-lg bg-cyan-400/10 p-3">
+              <Users className="h-6 w-6 text-cyan-400" />
+            </div>
+            <h3 className="mb-4 text-xl font-bold text-slate-100">
+              Desarrollo y Gestión del Talento
+            </h3>
+            <p className="text-slate-400">
+              Convertimos a tus profesionales en líderes que multiplican, no que
+              frenan. Programas de desarrollo, acompañamiento y herramientas de
+              evaluación con criterio.
+            </p>
+          </article>
+
+          <article className="rounded-2xl border border-white/5 bg-slate-900/30 p-8 transition-all duration-300 hover:-translate-y-2 hover:border-cyan-500/50 hover:bg-slate-900/60">
+            <div className="mb-6 inline-flex rounded-lg bg-violet-400/10 p-3">
+              <Target className="h-6 w-6 text-violet-400" />
+            </div>
+            <h3 className="mb-4 text-xl font-bold text-slate-100">
+              Liderazgo Sistémico
+            </h3>
+            <p className="text-slate-400">
+              Instalamos en tu equipo directivo una forma estable de fijar
+              prioridades, decidir y medir. Liderazgo que no depende del héroe
+              de turno, sino de un sistema replicable.
+            </p>
+          </article>
+        </div>
+
+        <div className="mt-16 flex justify-center px-6">
+          <a
+            href="#contacto"
+            className="group flex items-center gap-2 rounded-full border border-slate-700 px-8 py-3 text-slate-300 transition-all hover:border-cyan-400 hover:text-cyan-400"
+          >
+            <span>Ver propuestas y precios</span>
+            <ArrowRight className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-1" />
+          </a>
+        </div>
+      </section>
+
+      <section
+        id="metodologia"
+        className="relative overflow-hidden border-t border-white/5 bg-slate-950 py-32"
+      >
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 to-slate-950" />
+
+        <div className="relative z-10 mx-auto max-w-3xl px-6 text-center">
+          <h2 className="text-balance text-4xl font-bold tracking-tight text-slate-50 sm:text-5xl">
+            Un método, no una intuición
+          </h2>
+          <p className="mt-6 text-lg leading-8 text-slate-400">
+            Nuestro trabajo se apoya en un marco propio que mide y mueve el
+            rendimiento en tres dimensiones y doce palancas concretas. No
+            improvisamos: diagnosticamos, diseñamos, ejecutamos y medimos. Cada
+            intervención deja a tu organización más capaz de sostener el cambio
+            por sí misma.
+          </p>
+        </div>
+
+        <div className="relative mx-auto mt-24 grid max-w-7xl grid-cols-1 gap-12 px-6 md:grid-cols-3">
+          <div className="absolute left-[15%] right-[15%] top-10 z-0 hidden h-[1px] bg-gradient-to-r from-blue-500/0 via-cyan-500/50 to-violet-500/0 md:block" />
+
+          <div className="relative z-10 flex flex-col items-center text-center">
+            <div className="flex h-20 w-20 items-center justify-center rounded-full border border-blue-500/30 bg-slate-950 shadow-[0_0_30px_rgba(59,130,246,0.15)]">
+              <Database className="h-8 w-8 text-blue-400" />
+            </div>
+            <p className="mb-2 mt-8 text-xs font-bold tracking-widest text-blue-400">
+              PASO 1
+            </p>
+            <h3 className="text-xl font-semibold text-slate-100">
+              Diagnóstico con datos
+            </h3>
+          </div>
+
+          <div className="relative z-10 flex flex-col items-center text-center">
+            <div className="flex h-20 w-20 items-center justify-center rounded-full border border-cyan-500/30 bg-slate-950 shadow-[0_0_30px_rgba(34,211,238,0.15)]">
+              <Layers className="h-8 w-8 text-cyan-400" />
+            </div>
+            <p className="mb-2 mt-8 text-xs font-bold tracking-widest text-cyan-400">
+              PASO 2
+            </p>
+            <h3 className="text-xl font-semibold text-slate-100">
+              Diseño del sistema
+            </h3>
+          </div>
+
+          <div className="relative z-10 flex flex-col items-center text-center">
+            <div className="flex h-20 w-20 items-center justify-center rounded-full border border-violet-500/30 bg-slate-950 shadow-[0_0_30px_rgba(139,92,246,0.15)]">
+              <Rocket className="h-8 w-8 text-violet-400" />
+            </div>
+            <p className="mb-2 mt-8 text-xs font-bold tracking-widest text-violet-400">
+              PASO 3
+            </p>
+            <h3 className="text-xl font-semibold text-slate-100">
+              Ejecución acompañada
+            </h3>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="producto"
+        className="relative border-t border-white/5 bg-slate-950 py-32"
+      >
+        <div className="mx-auto max-w-3xl px-6 text-center">
+          <p className="text-xs font-bold tracking-widest text-violet-400">
+            PRÓXIMAMENTE
+          </p>
+          <h2 className="mt-4 text-balance text-4xl font-bold tracking-tight text-slate-50 sm:text-5xl">
+            Pronto, nuestra metodología en una plataforma
+          </h2>
+          <p className="mx-auto mt-6 max-w-2xl text-lg leading-8 text-slate-400">
+            Estamos construyendo Vínculo, la herramienta tecnológica que
+            llevará el sistema de alto rendimiento de ElevateX a tu día a día:
+            mide la madurez de tus equipos, activa las palancas correctas y
+            sigue el progreso en tiempo real.
+          </p>
+
+          <form
+            onSubmit={handleWaitlistSubmit}
+            className="mx-auto mt-10 flex max-w-xl flex-col gap-3 sm:flex-row sm:items-center"
+          >
+            <input
+              type="email"
+              value={waitlistEmail}
+              onChange={(event) => {
+                setWaitlistEmail(event.target.value);
+                setWaitlistStatus("idle");
+              }}
+              placeholder="tu@empresa.com"
+              className="w-full rounded-full border border-white/10 bg-slate-900 px-6 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+            />
+            <button
+              type="submit"
+              className="inline-flex shrink-0 items-center justify-center rounded-full bg-gradient-to-r from-blue-600 to-cyan-400 px-6 py-3 text-sm font-semibold text-white transition-all duration-300 hover:scale-105"
+            >
+              Unirme a la lista de espera
+            </button>
+          </form>
+
+          {waitlistStatus === "success" && (
+            <p className="mt-4 text-sm text-cyan-400">
+              ¡Gracias! Te avisaremos cuando Vínculo esté disponible.
+            </p>
+          )}
+          {waitlistStatus === "error" && (
+            <p className="mt-4 text-sm text-red-400">
+              Introduce un email corporativo válido.
+            </p>
+          )}
+        </div>
+      </section>
+
+      <section
+        id="contacto"
+        className="relative border-t border-white/5 bg-slate-950 py-32"
+      >
+        <div className="mx-auto grid max-w-7xl grid-cols-1 gap-16 px-6 md:grid-cols-2">
+          <div>
+            <h2 className="text-balance text-4xl font-bold tracking-tight text-slate-50 sm:text-5xl">
+              ¿Hablamos de tu salto exponencial?
+            </h2>
+            <p className="mt-4 text-lg leading-8 text-slate-400">
+              Una primera conversación, sin compromiso, para analizar las
+              restricciones de tu sistema, ver si encajamos y diseñar por dónde
+              empezaríamos a elevar el techo de tu organización.
+            </p>
+            <a
+              href="mailto:hola@elevatex.com"
+              className="mt-8 inline-flex items-center gap-2 font-medium text-cyan-400 transition-colors hover:text-cyan-300"
+            >
+              <Mail className="h-4 w-4" />
+              hola@elevatex.com
+            </a>
+          </div>
+
+          <form
+            onSubmit={handleContactSubmit}
+            className="rounded-2xl border border-white/5 bg-slate-900/50 p-8"
+          >
+            <div className="space-y-5">
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-slate-300">
+                  Nombre
+                </span>
+                <div className="relative">
+                  <User className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="text"
+                    value={contactForm.name}
+                    onChange={(event) => {
+                      setContactForm((current) => ({
+                        ...current,
+                        name: event.target.value,
+                      }));
+                      setContactStatus("idle");
+                    }}
+                    placeholder="Tu nombre"
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-slate-300">
+                  Empresa
+                </span>
+                <div className="relative">
+                  <Building className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="text"
+                    value={contactForm.company}
+                    onChange={(event) => {
+                      setContactForm((current) => ({
+                        ...current,
+                        company: event.target.value,
+                      }));
+                      setContactStatus("idle");
+                    }}
+                    placeholder="Nombre de tu organización"
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-slate-300">
+                  Email
+                </span>
+                <div className="relative">
+                  <Mail className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="email"
+                    value={contactForm.email}
+                    onChange={(event) => {
+                      setContactForm((current) => ({
+                        ...current,
+                        email: event.target.value,
+                      }));
+                      setContactStatus("idle");
+                    }}
+                    placeholder="tu@empresa.com"
+                    className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                  />
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-slate-300">
+                  ¿Qué te gustaría resolver?
+                </span>
+                <textarea
+                  value={contactForm.challenge}
+                  onChange={(event) => {
+                    setContactForm((current) => ({
+                      ...current,
+                      challenge: event.target.value,
+                    }));
+                    setContactStatus("idle");
+                  }}
+                  rows={5}
+                  placeholder="Cuéntanos el reto principal de tu equipo u organización..."
+                  className="w-full resize-none rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            {contactStatus === "error" && (
+              <p className="mt-4 text-sm text-red-400">
+                Completa todos los campos antes de enviar.
+              </p>
+            )}
+            {contactStatus === "success" && (
+              <p className="mt-4 text-sm text-cyan-400">
+                Mensaje recibido. Te contactaremos en breve.
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={contactStatus === "submitting"}
+              className="mt-6 w-full rounded-full bg-gradient-to-r from-blue-600 to-cyan-400 px-8 py-3.5 text-sm font-semibold text-white transition-all duration-300 hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {contactStatus === "submitting" ? "Enviando…" : "Enviar reto"}
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <footer className="border-t border-white/5 bg-slate-950 py-12 text-sm text-slate-500">
+        <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-6 px-6 md:flex-row">
+          <p className="max-w-md text-center md:text-left">
+            ELEVATEX · Estrategias exponenciales, ejecución impecable,
+            transformación audaz.
+          </p>
+
+          <div className="flex flex-wrap items-center justify-center gap-6">
+            <a
+              href="#"
+              className="transition-colors hover:text-slate-300"
+            >
+              Aviso Legal
+            </a>
+            <a
+              href="#"
+              className="transition-colors hover:text-slate-300"
+            >
+              Política de Privacidad
+            </a>
+            <a
+              href="https://www.linkedin.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 transition-colors hover:text-cyan-400"
+            >
+              LinkedIn
+              <ArrowUpRight className="h-4 w-4" />
+            </a>
+          </div>
+        </div>
+      </footer>
+    </main>
   );
 }

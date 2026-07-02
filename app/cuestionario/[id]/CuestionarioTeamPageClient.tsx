@@ -159,7 +159,8 @@ export default function CuestionarioTeamPageClient() {
   const searchParams = useSearchParams();
 
   const groupId = useMemo(() => extractGroupIdFromParams(params), [params]);
-  const participantToken = searchParams.get("token");
+  const participantToken =
+    searchParams.get("token") ?? searchParams.get("user");
 
   const [status, setStatus] = useState<BootstrapStatus>(() =>
     groupId ? "loading" : "invalid_url",

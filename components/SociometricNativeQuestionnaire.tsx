@@ -24,6 +24,7 @@ type SurveyQuestion = {
   survey_id?: string;
   question_number: number;
   question_text: string;
+  question_type?: string;
   block?: string;
   option_a: string;
   option_b: string;
@@ -34,6 +35,11 @@ type SurveyQuestion = {
   c?: string;
   d?: string;
 };
+
+function isEdtMetricQuestion(question: SurveyQuestion): boolean {
+  const questionType = question.question_type?.trim().toLowerCase();
+  return questionType !== "ona_nomination";
+}
 
 function normalizeSurveyQuestion(row: Record<string, unknown>): SurveyQuestion {
   const questionText = String(
@@ -50,6 +56,10 @@ function normalizeSurveyQuestion(row: Record<string, unknown>): SurveyQuestion {
     survey_id: row.survey_id != null ? String(row.survey_id) : undefined,
     question_number: Number(row.question_number),
     question_text: questionText,
+    question_type:
+      typeof row.question_type === "string"
+        ? row.question_type.trim()
+        : undefined,
     block: typeof row.block === "string" ? row.block.trim() : undefined,
     option_a: optionA,
     option_b: optionB,
@@ -265,20 +275,37 @@ function isRespondentNameColumnError(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
     normalized.includes("respondent_name") ||
-    normalized.includes("schema cache") ||
     (normalized.includes("column") &&
       normalized.includes("responses") &&
-      normalized.includes("could not find"))
+      normalized.includes("could not find") &&
+      normalized.includes("respondent_name"))
   );
+}
+
+function isResponseTimestampColumnError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("started_at") ||
+    normalized.includes("completed_at") ||
+    (normalized.includes("column") &&
+      normalized.includes("responses") &&
+      normalized.includes("could not find") &&
+      (normalized.includes("started_at") || normalized.includes("completed_at")))
+  );
+}
+
+function isResponsesSchemaCacheError(message: string): boolean {
+  return message.toLowerCase().includes("schema cache");
 }
 
 function buildAnswersPayload(
   edtAnswers: Record<number, EdtAnswerOption>,
+  edtQuestionNumbers: number[],
   onaInfluence: string[],
   onaCommunication: string[],
 ): Record<string, EdtAnswerOption | string[]> {
   const payload: Record<string, EdtAnswerOption | string[]> = {
-    ...buildEdtAnswersPayload(edtAnswers),
+    ...buildEdtAnswersPayload(edtAnswers, edtQuestionNumbers),
   };
 
   const influencia = onaInfluence.filter(Boolean);
@@ -388,6 +415,7 @@ export default function SociometricNativeQuestionnaire({
   const [error, setError] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [alreadyCompleted, setAlreadyCompleted] = useState(false);
+  const [startTime, setStartTime] = useState<string | null>(null);
   const submitLockRef = useRef(false);
 
   const edtQuestions = useMemo(
@@ -395,10 +423,17 @@ export default function SociometricNativeQuestionnaire({
       [...questions]
         .filter(
           (question) =>
-            question.question_text.length > 0 && question.question_number > 0,
+            question.question_text.length > 0 &&
+            question.question_number > 0 &&
+            isEdtMetricQuestion(question),
         )
         .sort((left, right) => left.question_number - right.question_number),
     [questions],
+  );
+
+  const edtQuestionNumbers = useMemo(
+    () => edtQuestions.map((question) => question.question_number),
+    [edtQuestions],
   );
 
   const showOnaStep = participants.length > 0;
@@ -443,6 +478,7 @@ export default function SociometricNativeQuestionnaire({
       setTokenError(null);
       setAlreadyCompleted(false);
       setAuthenticatedParticipant(null);
+      setStartTime(null);
 
       const token = participantToken?.trim() ?? "";
 
@@ -643,6 +679,24 @@ export default function SociometricNativeQuestionnaire({
   }, [groupId, surveyIdProp, participantToken, initialQuestions]);
 
   useEffect(() => {
+    if (
+      isLoading ||
+      tokenError ||
+      alreadyCompleted ||
+      !authenticatedParticipant?.id
+    ) {
+      return;
+    }
+
+    setStartTime((current) => current ?? new Date().toISOString());
+  }, [
+    isLoading,
+    tokenError,
+    alreadyCompleted,
+    authenticatedParticipant?.id,
+  ]);
+
+  useEffect(() => {
     setCurrentStep((step) => {
       if (steps.length === 0) {
         return 0;
@@ -728,32 +782,28 @@ export default function SociometricNativeQuestionnaire({
       return false;
     }
 
-    for (const question of edtQuestions) {
-      if (!answers[question.question_number]) {
-        setError(
-          `Falta responder la pregunta ${question.question_number}: «${question.question_text}».`,
-        );
-        setCurrentStep(
-          steps.findIndex(
-            (step) =>
-              step.kind === "edt" &&
-              step.question.question_number === question.question_number,
-          ),
-        );
-        return false;
-      }
+    const firstMissingEdtQuestion = edtQuestions.find(
+      (question) => !answers[question.question_number],
+    );
+
+    if (firstMissingEdtQuestion) {
+      setError(
+        `Completa las ${edtQuestions.length} preguntas del cuestionario antes de enviar.`,
+      );
+      setCurrentStep(
+        steps.findIndex(
+          (step) =>
+            step.kind === "edt" &&
+            step.question.question_number ===
+              firstMissingEdtQuestion.question_number,
+        ),
+      );
+      return false;
     }
 
     if (showOnaStep && onaInfluence.filter(Boolean).length < 1) {
       setError("Completa al menos una nominación en el bloque ONA.");
       setCurrentStep(steps.length - 1);
-      return false;
-    }
-
-    if (Object.keys(buildEdtAnswersPayload(answers)).length !== edtQuestions.length) {
-      setError(
-        `Completa las ${edtQuestions.length} preguntas del cuestionario antes de enviar.`,
-      );
       return false;
     }
 
@@ -819,10 +869,13 @@ export default function SociometricNativeQuestionnaire({
     respondentName: string;
     answersPayload: Record<string, EdtAnswerOption | string[] | string>;
     groupIdForInsert: string | number;
+    started_at: string | null;
+    completed_at: string;
   }): Promise<void> {
-    const buildResponseRow = (
-      includeRespondentColumn: boolean,
-    ): Record<string, unknown> => {
+    const buildResponseRow = (options: {
+      includeRespondentColumn: boolean;
+      includeTimestamps: boolean;
+    }): Record<string, unknown> => {
       const row: Record<string, unknown> = {
         survey_id: activeSurveyId,
         participant_id: input.participantId,
@@ -830,8 +883,15 @@ export default function SociometricNativeQuestionnaire({
         group_id: input.groupIdForInsert,
       };
 
-      if (includeRespondentColumn) {
+      if (options.includeRespondentColumn) {
         row.respondent_name = input.respondentName;
+      }
+
+      if (options.includeTimestamps) {
+        if (input.started_at) {
+          row.started_at = input.started_at;
+        }
+        row.completed_at = input.completed_at;
       }
 
       return row;
@@ -844,60 +904,74 @@ export default function SociometricNativeQuestionnaire({
       return { error };
     };
 
+    const insertVariants: Array<{
+      includeRespondentColumn: boolean;
+      includeTimestamps: boolean;
+    }> = [
+      { includeRespondentColumn: true, includeTimestamps: true },
+      { includeRespondentColumn: false, includeTimestamps: true },
+      { includeRespondentColumn: true, includeTimestamps: false },
+      { includeRespondentColumn: false, includeTimestamps: false },
+    ];
+
     try {
-      const primaryRow = buildResponseRow(true);
-      const { error: insertError } = await tryInsert(primaryRow);
+      for (let index = 0; index < insertVariants.length; index += 1) {
+        const variant = insertVariants[index];
+        const row = buildResponseRow(variant);
+        const { error: insertError } = await tryInsert(row);
 
-      if (!insertError) {
-        return;
-      }
-
-      if (isRespondentNameColumnError(insertError.message)) {
-        console.warn(
-          "[EDT Questionnaire] Fallback: respondent_name omitido del payload principal:",
-          insertError.message,
-        );
-
-        const { error: fallbackError } = await tryInsert(buildResponseRow(false));
-        if (fallbackError) {
-          throw new Error(fallbackError.message);
+        if (!insertError) {
+          return;
         }
 
-        return;
-      }
+        const isLastVariant = index === insertVariants.length - 1;
+        const canRetry =
+          !isLastVariant &&
+          (isRespondentNameColumnError(insertError.message) ||
+            isResponseTimestampColumnError(insertError.message) ||
+            isResponsesSchemaCacheError(insertError.message));
 
-      if (IS_LOCAL_DEV) {
-        console.warn(
-          "[EDT Questionnaire] Dev bypass: reintentando responses sin respondent_name en columna:",
-          insertError.message,
-        );
+        if (!canRetry) {
+          if (IS_LOCAL_DEV && index === 0) {
+            console.warn(
+              "[EDT Questionnaire] Dev bypass: reintentando responses con payload mínimo:",
+              insertError.message,
+            );
 
-        const { error: devFallbackError } = await tryInsert({
-          survey_id: activeSurveyId,
-          participant_id: input.participantId,
-          group_id: input.groupIdForInsert,
-          answers: input.answersPayload,
-        });
+            const { error: devFallbackError } = await tryInsert({
+              survey_id: activeSurveyId,
+              participant_id: input.participantId,
+              group_id: input.groupIdForInsert,
+              answers: input.answersPayload,
+            });
 
-        if (devFallbackError) {
-          throw new Error(devFallbackError.message);
+            if (!devFallbackError) {
+              return;
+            }
+
+            throw new Error(devFallbackError.message);
+          }
+
+          throw new Error(insertError.message);
         }
 
-        return;
+        console.warn(
+          "[EDT Questionnaire] Fallback de inserción en responses:",
+          insertError.message,
+        );
       }
-
-      throw new Error(insertError.message);
     } catch (persistError) {
       if (
         persistError instanceof Error &&
-        isRespondentNameColumnError(persistError.message)
+        (isRespondentNameColumnError(persistError.message) ||
+          isResponseTimestampColumnError(persistError.message))
       ) {
-        console.warn(
-          "[EDT Questionnaire] Fallback tras excepción de respondent_name:",
-          persistError.message,
+        const { error: fallbackError } = await tryInsert(
+          buildResponseRow({
+            includeRespondentColumn: false,
+            includeTimestamps: false,
+          }),
         );
-
-        const { error: fallbackError } = await tryInsert(buildResponseRow(false));
         if (fallbackError) {
           throw new Error(fallbackError.message);
         }
@@ -965,9 +1039,15 @@ export default function SociometricNativeQuestionnaire({
       }
 
       const respondentName = resolveRespondentName();
+      const completedTime = new Date().toISOString();
       const answersPayload: Record<string, EdtAnswerOption | string[] | string> =
         {
-          ...buildAnswersPayload(answers, onaInfluence, onaCommunication),
+          ...buildAnswersPayload(
+            answers,
+            edtQuestionNumbers,
+            onaInfluence,
+            onaCommunication,
+          ),
           respondent_name: respondentName,
         };
 
@@ -976,6 +1056,8 @@ export default function SociometricNativeQuestionnaire({
         respondentName,
         answersPayload,
         groupIdForInsert,
+        started_at: startTime,
+        completed_at: completedTime,
       });
 
       await markParticipantCompleted(participantId);
@@ -1000,13 +1082,8 @@ export default function SociometricNativeQuestionnaire({
     if (authenticatedParticipant?.id) {
       ids.add(authenticatedParticipant.id);
     }
-    for (const id of [...onaInfluence, ...onaCommunication]) {
-      if (id) {
-        ids.add(id);
-      }
-    }
     return ids;
-  }, [authenticatedParticipant?.id, onaCommunication, onaInfluence]);
+  }, [authenticatedParticipant?.id]);
 
   if (tokenError) {
     return (

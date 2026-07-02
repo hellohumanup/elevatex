@@ -16,10 +16,14 @@ export type EdtAnswersPayload = Record<
 
 export function buildEdtAnswersPayload(
   answers: Record<number, EdtAnswerOption>,
+  questionNumbers?: Iterable<number>,
 ): Record<string, EdtAnswerOption> {
   const payload: Record<string, EdtAnswerOption> = {};
+  const numbers = questionNumbers
+    ? [...questionNumbers]
+    : Array.from({ length: EDT_QUESTION_COUNT }, (_, index) => index + 1);
 
-  for (let questionNumber = 1; questionNumber <= EDT_QUESTION_COUNT; questionNumber += 1) {
+  for (const questionNumber of numbers) {
     const value = answers[questionNumber];
     if (value !== undefined) {
       payload[String(questionNumber)] = value;

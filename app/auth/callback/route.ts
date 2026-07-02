@@ -6,7 +6,7 @@ export async function GET(request: NextRequest) {
   const env = getSupabaseEnv();
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/cuestionario";
+  const next = searchParams.get("next") ?? "/admin/surveys";
 
   if (!env) {
     return NextResponse.redirect(

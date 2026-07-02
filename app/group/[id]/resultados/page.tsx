@@ -64,6 +64,9 @@ const RESULTADOS_PDF_EXPORT_ID = "resultados-dashboard-pdf";
 
 const GROUP_COLUMNS = "id, name, age_band, created_at, organization_id";
 
+const RESPONSE_COLUMNS =
+  "id, group_id, participant_id, respondent_name, answers, started_at, completed_at";
+
 type Participant = {
   id: string;
   name: string;
@@ -76,6 +79,15 @@ type Response = {
   participant_id: string | null;
   respondent_name?: string | null;
   answers: unknown;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+type AverageResponseTimeResult = {
+  display: string;
+  totalMs: number | null;
+  validCount: number;
+  isFastReflection: boolean;
 };
 
 type RankingEntry = {
@@ -183,6 +195,89 @@ function buildReciprocityLeaders(
         a.name.localeCompare(b.name, "es"),
     )
     .slice(0, 3);
+}
+
+const TWO_MINUTES_MS = 2 * 60 * 1000;
+
+function parseResponseDurationMs(
+  startedAt: unknown,
+  completedAt: unknown,
+): number | null {
+  if (typeof startedAt !== "string" || typeof completedAt !== "string") {
+    return null;
+  }
+
+  const startedMs = Date.parse(startedAt);
+  const completedMs = Date.parse(completedAt);
+
+  if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs)) {
+    return null;
+  }
+
+  const durationMs = completedMs - startedMs;
+
+  if (durationMs < 0) {
+    return null;
+  }
+
+  return durationMs;
+}
+
+function formatDurationMs(totalMs: number): string {
+  const totalSeconds = Math.round(totalMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function calculateAverageResponseTime(
+  responses: ReadonlyArray<unknown>,
+): AverageResponseTimeResult {
+  const durationsMs: number[] = [];
+
+  for (const response of responses) {
+    if (!response || typeof response !== "object") {
+      continue;
+    }
+
+    const record = response as {
+      started_at?: unknown;
+      completed_at?: unknown;
+    };
+    const durationMs = parseResponseDurationMs(
+      record.started_at,
+      record.completed_at,
+    );
+
+    if (durationMs !== null) {
+      durationsMs.push(durationMs);
+    }
+  }
+
+  if (durationsMs.length === 0) {
+    return {
+      display: "N/A",
+      totalMs: null,
+      validCount: 0,
+      isFastReflection: false,
+    };
+  }
+
+  const averageMs =
+    durationsMs.reduce((sum, durationMs) => sum + durationMs, 0) /
+    durationsMs.length;
+
+  return {
+    display: formatDurationMs(averageMs),
+    totalMs: averageMs,
+    validCount: durationsMs.length,
+    isFastReflection: averageMs < TWO_MINUTES_MS,
+  };
 }
 
 function buildRanking(
@@ -355,7 +450,7 @@ export default function ResultadosPage() {
           .eq("group_id", numericGroupId),
         supabase
           .from("responses")
-          .select("id, group_id, participant_id, respondent_name, answers")
+          .select(RESPONSE_COLUMNS)
           .eq("group_id", numericGroupId),
       ]);
 
@@ -449,7 +544,7 @@ export default function ResultadosPage() {
           .eq("group_id", targetGroupId),
         supabase
           .from("responses")
-          .select("id, group_id, participant_id, respondent_name, answers")
+          .select(RESPONSE_COLUMNS)
           .eq("group_id", targetGroupId),
       ]);
 
@@ -821,6 +916,11 @@ export default function ResultadosPage() {
   const indegreeMap = onaMetrics.indegree;
   const networkDensity = onaMetrics.density;
 
+  const averageResponseTime = useMemo(
+    () => calculateAverageResponseTime(responses),
+    [responses],
+  );
+
   useEffect(() => {
     if (participants.length === 0 && responses.length === 0) {
       return;
@@ -860,6 +960,16 @@ export default function ResultadosPage() {
     [participants, graphLinks],
   );
 
+  const participantsWithResponses = useMemo(() => {
+    const ids = new Set<string>();
+    for (const response of responses) {
+      if (response.participant_id) {
+        ids.add(normalizeParticipantId(String(response.participant_id)));
+      }
+    }
+    return ids;
+  }, [responses]);
+
   function closeIndividualInsightModal() {
     setSelectedParticipant(null);
     setIndividualInsight(null);
@@ -871,16 +981,30 @@ export default function ResultadosPage() {
       return;
     }
 
+    if (
+      !participantsWithResponses.has(normalizeParticipantId(entry.id))
+    ) {
+      return;
+    }
+
     const participantId = entry.id;
+    const normalizedParticipantId = normalizeParticipantId(participantId);
+    const teamOnaMetrics = computeOnaClientMetrics(participants, responses);
     const participantIndegree =
-      indegreeMap[participantId] ??
-      onaMetrics.indegree[participantId] ??
+      teamOnaMetrics.indegree[normalizedParticipantId] ??
+      indegreeMap[normalizedParticipantId] ??
       entry.votes;
     const participantReciprocity =
-      onaMetrics.reciprocity[participantId] ?? 0;
+      teamOnaMetrics.reciprocity[normalizedParticipantId] ?? 0;
     const participantSilo = resolveParticipantSiloLabel(
       participantId,
       networkSilos,
+    );
+    const participantResponse = responses.find(
+      (response) =>
+        response.participant_id !== null &&
+        normalizeParticipantId(String(response.participant_id)) ===
+          normalizedParticipantId,
     );
 
     const profile: SelectedParticipantProfile = {
@@ -905,10 +1029,22 @@ export default function ResultadosPage() {
         body: JSON.stringify({
           mode: "individual",
           groupName: groupName ?? `Equipo ${groupId}`,
+          participantId: profile.id,
           participantName: profile.name,
           participantIndegree: profile.indegree,
           participantReciprocity: profile.reciprocity,
           participantSilo: profile.silo,
+          networkDensityPercent: teamOnaMetrics.density.densityPercent,
+          density: teamOnaMetrics.density,
+          participants: participants.map((participant) => ({
+            id: String(participant.id),
+            name: participant.name,
+          })),
+          responses: responses.map((response) => ({
+            participant_id: response.participant_id,
+            answers: response.answers,
+          })),
+          participantAnswers: participantResponse?.answers ?? null,
         }),
       });
 
@@ -1262,6 +1398,27 @@ export default function ResultadosPage() {
                     </div>
                   </div>
 
+                  <div className="rounded-xl border border-violet-500/25 bg-slate-950/80 p-5 shadow-sm">
+                    <h3 className="text-sm font-semibold uppercase tracking-wide text-violet-300">
+                      Tiempo Promedio de Respuesta
+                    </h3>
+                    <p className="mt-1 text-xs text-slate-400">
+                      {averageResponseTime.validCount > 0
+                        ? `Duración media entre abrir y enviar el cuestionario (${averageResponseTime.validCount} respuesta${averageResponseTime.validCount === 1 ? "" : "s"} válida${averageResponseTime.validCount === 1 ? "" : "s"}).`
+                        : "Duración media entre abrir y enviar el cuestionario."}
+                    </p>
+                    <div className="mt-4 flex items-end gap-3">
+                      <p className="text-3xl font-semibold text-white">
+                        {averageResponseTime.display}
+                      </p>
+                    </div>
+                    {averageResponseTime.isFastReflection ? (
+                      <p className="mt-3 text-xs text-amber-500/90">
+                        Respuestas rápidas - Posible baja reflexión
+                      </p>
+                    ) : null}
+                  </div>
+
                   <div className="rounded-xl border border-cyan-500/25 bg-slate-950/80 p-5">
                     <h3 className="text-sm font-semibold uppercase tracking-wide text-cyan-300">
                       Silos Detectados
@@ -1566,7 +1723,12 @@ export default function ResultadosPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-white">
-                  {ranking.map((entry, index) => (
+                  {ranking.map((entry, index) => {
+                    const hasCompletedSurvey = participantsWithResponses.has(
+                      normalizeParticipantId(entry.id),
+                    );
+
+                    return (
                     <tr key={`${entry.id}-${index}`} className="hover:bg-slate-50">
                       <td className="whitespace-nowrap px-6 py-4 text-sm font-medium text-slate-500">
                         #{index + 1}
@@ -1574,22 +1736,40 @@ export default function ResultadosPage() {
                       <td className="px-6 py-4 text-sm font-medium text-slate-900">
                         <div className="flex flex-wrap items-center gap-3">
                           <span className="whitespace-nowrap">{entry.name}</span>
-                          <button
-                            type="button"
-                            onClick={() => handleGenerateIndividualInsight(entry)}
-                            disabled={isGeneratingIndividual}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-800 transition-colors hover:border-violet-300 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isGeneratingIndividual &&
-                            selectedParticipant?.id === entry.id ? (
-                              <>
-                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
-                                Analizando…
-                              </>
-                            ) : (
-                              "Analizar Perfil con IA"
-                            )}
-                          </button>
+                          <div className="group relative inline-flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleGenerateIndividualInsight(entry)}
+                              disabled={
+                                isGeneratingIndividual || !hasCompletedSurvey
+                              }
+                              title={
+                                hasCompletedSurvey
+                                  ? undefined
+                                  : "Pendiente de realizar test"
+                              }
+                              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                                hasCompletedSurvey
+                                  ? "border-violet-200 bg-violet-50 text-violet-800 hover:border-violet-300 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                  : "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400 opacity-50"
+                              }`}
+                            >
+                              {isGeneratingIndividual &&
+                              selectedParticipant?.id === entry.id ? (
+                                <>
+                                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
+                                  Analizando…
+                                </>
+                              ) : (
+                                "Analizar Perfil con IA"
+                              )}
+                            </button>
+                            {!hasCompletedSurvey ? (
+                              <span className="text-xs text-slate-400 group-hover:text-slate-500">
+                                Pendiente de realizar test
+                              </span>
+                            ) : null}
+                          </div>
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-6 py-4">
@@ -1614,7 +1794,8 @@ export default function ResultadosPage() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

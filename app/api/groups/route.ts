@@ -4,6 +4,7 @@ import {
   type GroupRecord,
 } from "@/lib/groups";
 import { normalizeOrganizationId } from "@/lib/organizations";
+import { ensureOrganizationWithServiceRole } from "@/lib/organizations-admin";
 import { FALLBACK_TEST_TENANT_ID, createSupabaseServiceRoleClient } from "@/lib/supabase/service-role";
 
 export const dynamic = "force-dynamic";
@@ -54,6 +55,22 @@ export async function POST(request: Request) {
     normalizeOrganizationId(body.organization_id) ??
     DEMO_DASHBOARD_ORGANIZATION_ID;
 
+  const ensuredOrganization = await ensureOrganizationWithServiceRole({
+    id: organizationId,
+    name: "Organización Demo",
+  });
+
+  if (ensuredOrganization.error || !ensuredOrganization.id) {
+    return NextResponse.json(
+      {
+        error:
+          ensuredOrganization.error ??
+          "No se pudo asegurar la organización antes de crear el equipo.",
+      },
+      { status: 500 },
+    );
+  }
+
   const managerId = normalizeOrganizationId(body.manager_id);
 
   console.log("[BACKEND MULTI-TENANT] Insertando grupo con tenant:", {
@@ -64,7 +81,7 @@ export async function POST(request: Request) {
   const payload = {
     name,
     age_band: ageBand,
-    organization_id: organizationId,
+    organization_id: ensuredOrganization.id,
     manager_id: managerId,
     tenant_id: FALLBACK_TEST_TENANT_ID,
   };

@@ -4,18 +4,11 @@ import {
   fetchDefaultEdtSurveyId,
   type EdtAnswerOption,
 } from "@/lib/surveyQuestions";
+import { DEMO_DASHBOARD_ORGANIZATION_ID } from "@/lib/groups";
 import { toSupabaseGroupId } from "@/lib/groupId";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const EDT_OPTIONS: EdtAnswerOption[] = ["A", "B", "C", "D"];
-
-/** Escala Likert por defecto — requerida por columnas NOT NULL en survey_responses/responses. */
-const DEFAULT_EDT_SCALE_OPTIONS = {
-  option_a: "Totalmente de acuerdo",
-  option_b: "De acuerdo",
-  option_c: "En desacuerdo",
-  option_d: "Totalmente en desacuerdo",
-} as const;
 
 const FICTITIOUS_FIRST_NAMES = [
   "Ana",
@@ -211,6 +204,15 @@ export async function simulateDevVotesForGroup(
   const responseCount = randomInt(10, 15);
   const fictitiousNames = buildFictitiousNames(responseCount);
 
+  const { error: groupOrgError } = await supabase
+    .from("groups")
+    .update({ organization_id: DEMO_DASHBOARD_ORGANIZATION_ID })
+    .eq("id", supabaseGroupId);
+
+  if (groupOrgError) {
+    throw new Error(groupOrgError.message);
+  }
+
   const { error: deleteResponsesError } = await supabase
     .from("responses")
     .delete()
@@ -264,7 +266,6 @@ export async function simulateDevVotesForGroup(
       participantIds,
       hubIds,
     ),
-    ...DEFAULT_EDT_SCALE_OPTIONS,
   }));
 
   const { error: insertResponsesError } = await supabase
