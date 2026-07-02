@@ -5,7 +5,7 @@ import { createSupabaseServiceRoleClient } from "@/lib/supabase/service-role";
 
 export const dynamic = "force-dynamic";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resend = new Resend(process.env.RESEND_API_KEY || "re_dummy_key_para_pasar_el_build");
 
 const INVITATION_SUBJECT =
   "¡Tu equipo te necesita! Participa en la dinámica de Vínculo";
