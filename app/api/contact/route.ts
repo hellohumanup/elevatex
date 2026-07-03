@@ -3,11 +3,12 @@ import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
+const LEAD_RECIPIENT_EMAIL = "pedro@elevatex-up.com";
+const RESEND_FROM_EMAIL = "onboarding@resend.dev";
+
 const resend = new Resend(
   process.env.RESEND_API_KEY || "re_dummy_key_para_pasar_el_build",
 );
-
-const DEFAULT_LEAD_RECIPIENT = "hola@elevatex.com";
 
 type ContactPayload = {
   name?: string;
@@ -83,7 +84,7 @@ export async function POST(request: Request) {
         {
           success: false,
           error:
-            "El servicio de contacto no está disponible temporalmente. Escríbenos a hola@elevatex.com.",
+            "El servicio de contacto no está disponible temporalmente. Escríbenos a pedro@elevatex-up.com.",
         },
         { status: 503 },
       );
@@ -118,16 +119,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const toAddress =
-      process.env.CONTACT_LEAD_EMAIL?.trim() || DEFAULT_LEAD_RECIPIENT;
-    const fromAddress =
-      process.env.RESEND_FROM_EMAIL?.trim() || "onboarding@resend.dev";
-
     const { error: sendError } = await resend.emails.send({
-      from: fromAddress,
-      to: [toAddress],
+      from: RESEND_FROM_EMAIL,
+      to: [LEAD_RECIPIENT_EMAIL],
       replyTo: email,
-      subject: `Nuevo Lead: ${company} - ElevateX`,
+      subject: `🚀 Nuevo Lead ElevateX: ${company}`,
       html: buildLeadEmailHtml({ name, email, company }),
     });
 
