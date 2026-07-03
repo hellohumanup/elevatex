@@ -37,8 +37,10 @@ type ContactFormState = {
   name: string;
   company: string;
   email: string;
-  challenge: string;
 };
+
+const LEAD_SUCCESS_MESSAGE =
+  "¡Solicitud recibida! Debido a la alta demanda y para garantizar la máxima calidad, abrimos acceso a un grupo limitado de 20 empresas al mes. Nos pondremos en contacto contigo en menos de 24 horas si tu perfil es seleccionado.";
 
 export default function HomePage() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -51,11 +53,11 @@ export default function HomePage() {
     name: "",
     company: "",
     email: "",
-    challenge: "",
   });
   const [contactStatus, setContactStatus] = useState<
     "idle" | "submitting" | "success" | "error"
   >("idle");
+  const [contactError, setContactError] = useState<string | null>(null);
 
   function handleWaitlistSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -69,30 +71,59 @@ export default function HomePage() {
     setWaitlistEmail("");
   }
 
-  function handleContactSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleContactSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (
       !contactForm.name.trim() ||
       !contactForm.company.trim() ||
-      !contactForm.email.trim() ||
-      !contactForm.challenge.trim()
+      !contactForm.email.trim()
     ) {
+      setContactError("Completa todos los campos antes de enviar.");
       setContactStatus("error");
       return;
     }
 
     setContactStatus("submitting");
+    setContactError(null);
 
-    setTimeout(() => {
+    try {
+      const response = await fetch("/api/contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: contactForm.name.trim(),
+          email: contactForm.email.trim(),
+          company: contactForm.company.trim(),
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !payload.success) {
+        setContactError(
+          payload.error ||
+            "No pudimos registrar tu solicitud. Inténtalo de nuevo en unos instantes.",
+        );
+        setContactStatus("error");
+        return;
+      }
+
       setContactStatus("success");
       setContactForm({
         name: "",
         company: "",
         email: "",
-        challenge: "",
       });
-    }, 800);
+    } catch {
+      setContactError(
+        "Error de conexión con el servidor. Por favor, inténtalo de nuevo en unos instantes.",
+      );
+      setContactStatus("error");
+    }
   }
 
   return (
@@ -572,113 +603,113 @@ export default function HomePage() {
 
           <form
             onSubmit={handleContactSubmit}
-            className="rounded-2xl border border-white/5 bg-slate-900/50 p-8"
+            className="rounded-2xl border border-white/5 bg-slate-900/50 p-8 shadow-[0_0_40px_rgba(8,145,178,0.08)] backdrop-blur-sm"
           >
-            <div className="space-y-5">
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-300">
-                  Nombre
-                </span>
-                <div className="relative">
-                  <User className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-                  <input
-                    type="text"
-                    value={contactForm.name}
-                    onChange={(event) => {
-                      setContactForm((current) => ({
-                        ...current,
-                        name: event.target.value,
-                      }));
-                      setContactStatus("idle");
-                    }}
-                    placeholder="Tu nombre"
-                    className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
-                  />
+            {contactStatus === "success" ? (
+              <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-6 text-center">
+                <p className="text-sm font-semibold uppercase tracking-widest text-cyan-300">
+                  Solicitud registrada
+                </p>
+                <p className="mt-4 text-base leading-relaxed text-slate-200">
+                  {LEAD_SUCCESS_MESSAGE}
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="space-y-5">
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-slate-300">
+                      Nombre
+                    </span>
+                    <div className="relative">
+                      <User className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                      <input
+                        type="text"
+                        value={contactForm.name}
+                        onChange={(event) => {
+                          setContactForm((current) => ({
+                            ...current,
+                            name: event.target.value,
+                          }));
+                          setContactStatus("idle");
+                          setContactError(null);
+                        }}
+                        placeholder="Tu nombre"
+                        className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 transition-colors focus:border-cyan-400 focus:outline-none focus:ring-1 focus:ring-cyan-400/30"
+                      />
+                    </div>
+                  </label>
+
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-slate-300">
+                      Correo Electrónico
+                    </span>
+                    <div className="relative">
+                      <Mail className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                      <input
+                        type="email"
+                        value={contactForm.email}
+                        onChange={(event) => {
+                          setContactForm((current) => ({
+                            ...current,
+                            email: event.target.value,
+                          }));
+                          setContactStatus("idle");
+                          setContactError(null);
+                        }}
+                        placeholder="tu@empresa.com"
+                        className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 transition-colors focus:border-cyan-400 focus:outline-none focus:ring-1 focus:ring-cyan-400/30"
+                      />
+                    </div>
+                  </label>
+
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-slate-300">
+                      Nombre de la Empresa
+                    </span>
+                    <div className="relative">
+                      <Building className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                      <input
+                        type="text"
+                        value={contactForm.company}
+                        onChange={(event) => {
+                          setContactForm((current) => ({
+                            ...current,
+                            company: event.target.value,
+                          }));
+                          setContactStatus("idle");
+                          setContactError(null);
+                        }}
+                        placeholder="Nombre de tu organización"
+                        className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 transition-colors focus:border-cyan-400 focus:outline-none focus:ring-1 focus:ring-cyan-400/30"
+                      />
+                    </div>
+                  </label>
                 </div>
-              </label>
 
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-300">
-                  Empresa
-                </span>
-                <div className="relative">
-                  <Building className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-                  <input
-                    type="text"
-                    value={contactForm.company}
-                    onChange={(event) => {
-                      setContactForm((current) => ({
-                        ...current,
-                        company: event.target.value,
-                      }));
-                      setContactStatus("idle");
-                    }}
-                    placeholder="Nombre de tu organización"
-                    className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
-                  />
-                </div>
-              </label>
+                {contactStatus === "error" && contactError && (
+                  <p className="mt-4 text-sm text-red-400">{contactError}</p>
+                )}
 
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-300">
-                  Email
-                </span>
-                <div className="relative">
-                  <Mail className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-                  <input
-                    type="email"
-                    value={contactForm.email}
-                    onChange={(event) => {
-                      setContactForm((current) => ({
-                        ...current,
-                        email: event.target.value,
-                      }));
-                      setContactStatus("idle");
-                    }}
-                    placeholder="tu@empresa.com"
-                    className="w-full rounded-xl border border-white/10 bg-slate-950 py-3 pl-11 pr-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
-                  />
-                </div>
-              </label>
-
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-300">
-                  ¿Qué te gustaría resolver?
-                </span>
-                <textarea
-                  value={contactForm.challenge}
-                  onChange={(event) => {
-                    setContactForm((current) => ({
-                      ...current,
-                      challenge: event.target.value,
-                    }));
-                    setContactStatus("idle");
-                  }}
-                  rows={5}
-                  placeholder="Cuéntanos el reto principal de tu equipo u organización..."
-                  className="w-full resize-none rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
-                />
-              </label>
-            </div>
-
-            {contactStatus === "error" && (
-              <p className="mt-4 text-sm text-red-400">
-                Completa todos los campos antes de enviar.
-              </p>
+                <button
+                  type="submit"
+                  disabled={contactStatus === "submitting"}
+                  className="group mt-6 w-full rounded-full bg-gradient-to-r from-blue-600 to-cyan-400 px-8 py-4 text-sm font-semibold text-white shadow-[0_0_40px_rgba(8,145,178,0.24)] transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_50px_rgba(34,211,238,0.28)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {contactStatus === "submitting" ? (
+                    <span className="inline-flex items-center justify-center gap-2">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      Enviando solicitud…
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center justify-center gap-2">
+                      Solicitar Acceso Exclusivo
+                      <ArrowRight className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-1" />
+                    </span>
+                  )}
+                </button>
+              </>
             )}
-            {contactStatus === "success" && (
-              <p className="mt-4 text-sm text-cyan-400">
-                Mensaje recibido. Te contactaremos en breve.
-              </p>
-            )}
-
-            <button
-              type="submit"
-              disabled={contactStatus === "submitting"}
-              className="mt-6 w-full rounded-full bg-gradient-to-r from-blue-600 to-cyan-400 px-8 py-3.5 text-sm font-semibold text-white transition-all duration-300 hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {contactStatus === "submitting" ? "Enviando…" : "Enviar reto"}
-            </button>
           </form>
         </div>
       </section>
@@ -691,18 +722,24 @@ export default function HomePage() {
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-6">
-            <a
-              href="#"
+            <Link
+              href="/aviso-legal"
               className="transition-colors hover:text-slate-300"
             >
               Aviso Legal
-            </a>
-            <a
-              href="#"
+            </Link>
+            <Link
+              href="/privacidad"
               className="transition-colors hover:text-slate-300"
             >
               Política de Privacidad
-            </a>
+            </Link>
+            <Link
+              href="/cookies"
+              className="transition-colors hover:text-slate-300"
+            >
+              Política de Cookies
+            </Link>
             <a
               href="https://www.linkedin.com"
               target="_blank"

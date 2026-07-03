@@ -28,8 +28,8 @@ export default function AvisoLegalPage() {
             </h2>
             <p className="mt-2 leading-relaxed">
               En cumplimiento de la normativa aplicable, se informa de que este
-              sitio web es titularidad de [Razón social / nombre del titular],
-              con domicilio en [dirección], y datos de contacto en{" "}
+              sitio web es titularidad de ElevateX, con domicilio en España, y
+              datos de contacto en{" "}
               <a
                 href="mailto:hola@elevatex.com"
                 className="text-cyan-400 transition-colors hover:text-cyan-300"

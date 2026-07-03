@@ -9,6 +9,20 @@ export function getSupabaseEnv() {
   return { supabaseUrl, supabaseAnonKey };
 }
 
+/** Log temporal para verificar en consola del navegador que las env vars están presentes. */
+export function logSupabaseEnvDebug(source: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  console.log(`[Supabase] Debug env (${source})`);
+  console.log("Supabase URL cargada:", !!process.env.NEXT_PUBLIC_SUPABASE_URL);
+  console.log(
+    "Supabase ANON KEY cargada:",
+    !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  );
+}
+
 export function assertSupabaseEnv() {
   const env = getSupabaseEnv();
 

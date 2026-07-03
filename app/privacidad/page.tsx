@@ -28,8 +28,7 @@ export default function PrivacidadPage() {
               Responsable del tratamiento
             </h2>
             <p className="mt-2 leading-relaxed">
-              [Razón social / nombre del titular], con domicilio en [dirección] y
-              correo de contacto{" "}
+              ElevateX, con domicilio en España y correo de contacto{" "}
               <a
                 href="mailto:hola@elevatex.com"
                 className="text-cyan-400 transition-colors hover:text-cyan-300"
@@ -48,7 +47,7 @@ export default function PrivacidadPage() {
             <p className="mt-2 leading-relaxed">
               Recogemos los datos que el usuario facilita voluntariamente a
               través de los formularios de contacto y de registro en la lista de
-              espera: nombre, correo electrónico, empresa y mensaje.
+              espera: nombre, correo electrónico y empresa.
             </p>
           </div>
 

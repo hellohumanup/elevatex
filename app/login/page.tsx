@@ -3,12 +3,31 @@
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { translateAuthError } from "@/lib/supabase/auth-errors";
 
 const inputClassName =
   "w-full rounded-lg border border-slate-800 bg-slate-900/80 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 transition-all focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:cursor-not-allowed disabled:opacity-50";
 
+const CONNECTION_ERROR_MESSAGE =
+  "Error de conexión con el servidor. Por favor, inténtalo de nuevo en unos instantes";
+
+function isAuthConnectionFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const record = error as { name?: string; message?: string };
+  const message = record.message?.toLowerCase() ?? "";
+
+  return (
+    record.name === "AuthRetryableFetchError" ||
+    message.includes("fetch") ||
+    message.includes("network") ||
+    message.includes("failed to fetch")
+  );
+}
+
 export default function LoginPage() {
+  const SUPER_ADMIN_EMAIL = "pedro@prueba.com";
   const router = useRouter();
   const supabase = createClientComponentClient();
 
@@ -39,7 +58,8 @@ export default function LoginPage() {
       });
 
       if (signInError) {
-        setError(translateAuthError(signInError.message));
+        console.error("DEBUG AUTH:", signInError);
+        setError(signInError?.message || "Ocurrió un error inesperado");
         return;
       }
 
@@ -48,11 +68,18 @@ export default function LoginPage() {
         return;
       }
 
-      router.push("/admin/surveys");
+      const normalizedEmail = email.trim();
+
+      if (normalizedEmail === SUPER_ADMIN_EMAIL) {
+        router.push("/admin");
+      } else {
+        router.push("/admin/surveys");
+      }
     } catch (caughtError) {
+      console.error("DEBUG AUTH:", caughtError);
       setError(
         caughtError instanceof Error
-          ? translateAuthError(caughtError.message)
+          ? caughtError.message || "Ocurrió un error inesperado"
           : "Error inesperado al iniciar sesión.",
       );
     } finally {
@@ -73,21 +100,45 @@ export default function LoginPage() {
     setSuccessMessage(null);
 
     try {
-      const { data, error: signUpError } = await supabase.auth.signUp({
-        email: email.trim(),
-        password,
-        options: {
-          data: { name: name.trim() },
-        },
-      });
+      let data;
+      let signUpError;
+
+      try {
+        const result = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: {
+            data: { name: name.trim() },
+          },
+        });
+        data = result.data;
+        signUpError = result.error;
+      } catch (signUpException) {
+        console.error("DEBUG AUTH:", signUpException);
+        setError(CONNECTION_ERROR_MESSAGE);
+        return;
+      }
 
       if (signUpError) {
-        setError(translateAuthError(signUpError.message));
+        console.error("DEBUG AUTH:", signUpError);
+
+        if (isAuthConnectionFailure(signUpError)) {
+          setError(CONNECTION_ERROR_MESSAGE);
+          return;
+        }
+
+        setError(signUpError?.message || "Ocurrió un error inesperado");
         return;
       }
 
       if (data.session?.user) {
-        router.push("/admin/surveys");
+        const normalizedEmail = email.trim();
+
+        if (normalizedEmail === SUPER_ADMIN_EMAIL) {
+          router.push("/admin");
+        } else {
+          router.push("/admin/surveys");
+        }
         return;
       }
 
@@ -96,11 +147,8 @@ export default function LoginPage() {
       );
       setIsSignUp(false);
     } catch (caughtError) {
-      setError(
-        caughtError instanceof Error
-          ? translateAuthError(caughtError.message)
-          : "Error inesperado al registrarse.",
-      );
+      console.error("DEBUG AUTH:", caughtError);
+      setError(CONNECTION_ERROR_MESSAGE);
     } finally {
       setIsSubmitting(false);
     }
