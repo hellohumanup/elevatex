@@ -6,10 +6,6 @@ export const dynamic = "force-dynamic";
 const LEAD_RECIPIENT_EMAIL = "hello@elevatex-up.com";
 const RESEND_FROM_EMAIL = "onboarding@resend.dev";
 
-const resend = new Resend(
-  process.env.RESEND_API_KEY || "re_dummy_key_para_pasar_el_build",
-);
-
 type ContactPayload = {
   name?: string;
   email?: string;
@@ -79,16 +75,20 @@ function buildLeadEmailHtml(input: {
 
 export async function POST(request: Request) {
   try {
-    if (!process.env.RESEND_API_KEY) {
+    const apiKey = process.env.RESEND_API_KEY?.trim();
+
+    if (!apiKey) {
       return NextResponse.json(
         {
           success: false,
           error:
-            "El servicio de contacto no está disponible temporalmente. Escríbenos a pedro@elevatex-up.com.",
+            "El servicio de contacto no está disponible temporalmente. Escríbenos a hello@elevatex-up.com.",
         },
         { status: 503 },
       );
     }
+
+    const resend = new Resend(apiKey);
 
     let body: ContactPayload;
 
@@ -120,7 +120,7 @@ export async function POST(request: Request) {
     }
 
     const { error: sendError } = await resend.emails.send({
-      from: RESEND_FROM_EMAIL,
+      from: `ElevateX <${RESEND_FROM_EMAIL}>`,
       to: [LEAD_RECIPIENT_EMAIL],
       replyTo: email,
       subject: `🚀 Nuevo Lead ElevateX: ${company}`,

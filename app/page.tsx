@@ -593,11 +593,11 @@ export default function HomePage() {
               empezaríamos a elevar el techo de tu organización.
             </p>
             <a
-              href="mailto:hola@elevatex.com"
+              href="mailto:hello@elevatex-up.com"
               className="mt-8 inline-flex items-center gap-2 font-medium text-cyan-400 transition-colors hover:text-cyan-300"
             >
               <Mail className="h-4 w-4" />
-              hola@elevatex.com
+              hello@elevatex-up.com
             </a>
           </div>
 
