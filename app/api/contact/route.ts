@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 const LEAD_RECIPIENT_EMAIL = "hello@elevatex-up.com";
-const RESEND_FROM_EMAIL = "onboarding@resend.dev";
+const RESEND_FROM_EMAIL = "hello@elevatex-up.com";
 
 type ContactPayload = {
   name?: string;
