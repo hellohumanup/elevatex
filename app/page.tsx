@@ -738,7 +738,7 @@ export default function HomePage() {
               Política de Cookies
             </Link>
             <a
-              href="https://www.linkedin.com"
+              href="https://www.linkedin.com/company/elevate-x-up/"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 transition-colors hover:text-cyan-400"
