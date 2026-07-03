@@ -27,6 +27,10 @@ import {
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 
+function scrollToContacto() {
+  document.getElementById("contacto")?.scrollIntoView({ behavior: "smooth" });
+}
+
 const navLinks = [
   { href: "#problema", label: "Problema" },
   { href: "#servicios", label: "Servicios" },
@@ -135,7 +139,7 @@ export default function HomePage() {
             onClick={() => setIsMenuOpen(false)}
             className="text-sm font-bold uppercase tracking-[0.2em] text-slate-50 transition-opacity duration-300 hover:opacity-90"
           >
-            ELEVATEX
+            ELEVATEX<sup className="text-[0.55em] font-normal">®</sup>
           </a>
 
           <div className="hidden items-center gap-8 md:flex">
@@ -151,13 +155,6 @@ export default function HomePage() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Link
-              href="/login"
-              className="hidden items-center justify-center rounded-full border border-slate-700 bg-transparent px-4 py-2.5 text-sm font-semibold text-slate-100 transition-all duration-300 hover:scale-105 hover:bg-slate-800 md:inline-flex"
-            >
-              Acceso Clientes
-            </Link>
-
             <a
               href="#contacto"
               className="hidden items-center justify-center rounded-full bg-white px-4 py-2.5 text-sm font-semibold text-slate-950 transition-all duration-300 hover:scale-105 hover:bg-slate-100 md:inline-flex"
@@ -194,13 +191,6 @@ export default function HomePage() {
                   {link.label}
                 </a>
               ))}
-              <Link
-                href="/login"
-                onClick={() => setIsMenuOpen(false)}
-                className="block border-b border-white/5 py-5 text-center text-lg font-medium text-slate-200 transition-colors hover:text-cyan-300"
-              >
-                Acceso Clientes
-              </Link>
               <a
                 href="#contacto"
                 onClick={() => setIsMenuOpen(false)}
@@ -457,6 +447,10 @@ export default function HomePage() {
         <div className="mt-16 flex justify-center px-6">
           <a
             href="#contacto"
+            onClick={(event) => {
+              event.preventDefault();
+              scrollToContacto();
+            }}
             className="group flex items-center gap-2 rounded-full border border-slate-700 px-8 py-3 text-slate-300 transition-all hover:border-cyan-400 hover:text-cyan-400"
           >
             <span>Ver propuestas y precios</span>
@@ -534,13 +528,15 @@ export default function HomePage() {
             PRÓXIMAMENTE
           </p>
           <h2 className="mt-4 text-balance text-4xl font-bold tracking-tight text-slate-50 sm:text-5xl">
-            Pronto, nuestra metodología en una plataforma
+            Pronto, la última versión de nuestro SaaS ElevateX
+            <sup className="text-[0.45em] font-normal text-violet-300">®</sup>
           </h2>
           <p className="mx-auto mt-6 max-w-2xl text-lg leading-8 text-slate-400">
-            Estamos construyendo Vínculo, la herramienta tecnológica que
-            llevará el sistema de alto rendimiento de ElevateX a tu día a día:
-            mide la madurez de tus equipos, activa las palancas correctas y
-            sigue el progreso en tiempo real.
+            Tras meses de desarrollo y el respaldo de un modelo matemático
+            ultra-robusto, ponemos a tu alcance la tecnología definitiva para
+            medir la madurez de tus equipos, activar las palancas de rendimiento
+            correctas y monitorizar el impacto en tiempo real. Una gestión
+            única, predictiva y disruptiva.
           </p>
 
           <form
@@ -717,8 +713,9 @@ export default function HomePage() {
       <footer className="border-t border-white/5 bg-slate-950 py-12 text-sm text-slate-500">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-6 px-6 md:flex-row">
           <p className="max-w-md text-center md:text-left">
-            ELEVATEX · Estrategias exponenciales, ejecución impecable,
-            transformación audaz.
+            ELEVATEX<sup className="text-[0.55em] font-normal">®</sup> ·
+            Estrategias exponenciales, ejecución impecable, transformación
+            audaz.
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-6">
@@ -751,6 +748,9 @@ export default function HomePage() {
             </a>
           </div>
         </div>
+        <p className="mx-auto mt-8 max-w-7xl px-6 text-center text-xs text-slate-600">
+          ElevateX<sup className="text-[0.65em]">®</sup> es una marca registrada.
+        </p>
       </footer>
     </main>
   );
