@@ -1,5 +1,8 @@
+"use client";
+
 import Link from "next/link";
 import { Activity, ChevronRight, Network } from "lucide-react";
+import { FormEvent, useState } from "react";
 
 const navLinks = [
   { href: "#dolor", label: "Dolor" },
@@ -7,7 +10,60 @@ const navLinks = [
   { href: "#valor", label: "Valor" },
 ];
 
+const WAITLIST_SUCCESS_MESSAGE =
+  "¡Gracias! Te hemos añadido a la lista de espera. Te avisaremos en cuanto ElevateX® esté disponible para tu organización.";
+
 export default function LandingPage() {
+  const [waitlistEmail, setWaitlistEmail] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleWaitlistSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!waitlistEmail.trim()) {
+      setError("Introduce un email corporativo válido.");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "lista_espera",
+          email: waitlistEmail.trim(),
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !payload.success) {
+        setError(
+          payload.error ||
+            "No pudimos registrarte en la lista. Inténtalo de nuevo en unos instantes.",
+        );
+        return;
+      }
+
+      setSubmitted(true);
+      setWaitlistEmail("");
+    } catch {
+      setError(
+        "Error de conexión con el servidor. Por favor, inténtalo de nuevo en unos instantes.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50">
       <div className="fixed inset-x-0 top-0 z-50 border-b border-white/10 bg-slate-950/70 backdrop-blur-xl">
@@ -106,10 +162,67 @@ export default function LandingPage() {
         id="valor"
         className="min-h-screen border-t border-white/10 bg-slate-950"
       />
+
       <section
         id="pricing"
-        className="min-h-screen border-t border-white/10 bg-slate-950"
-      />
+        className="relative border-t border-white/5 bg-slate-950 py-32"
+      >
+        <div className="mx-auto max-w-3xl px-6 text-center">
+          <p className="text-xs font-bold tracking-widest text-violet-400">
+            PRÓXIMAMENTE
+          </p>
+          <h2 className="mt-4 text-balance text-4xl font-bold tracking-tight text-slate-50 sm:text-5xl">
+            Pronto, la última versión de nuestro SaaS ElevateX
+            <sup className="text-[0.45em] font-normal text-violet-300">®</sup>
+          </h2>
+          <p className="mx-auto mt-6 max-w-2xl text-lg leading-8 text-slate-400">
+            Tras meses de desarrollo y el respaldo de un modelo matemático
+            ultra-robusto, ponemos a tu alcance la tecnología definitiva para
+            medir la madurez de tus equipos, activar las palancas de rendimiento
+            correctas y monitorizar el impacto en tiempo real. Una gestión
+            única, predictiva y disruptiva.
+          </p>
+
+          {submitted ? (
+            <div className="mx-auto mt-10 max-w-xl rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-6">
+              <p className="text-sm font-semibold uppercase tracking-widest text-cyan-300">
+                Registro confirmado
+              </p>
+              <p className="mt-4 text-base leading-relaxed text-slate-200">
+                {WAITLIST_SUCCESS_MESSAGE}
+              </p>
+            </div>
+          ) : (
+            <>
+              <form
+                onSubmit={handleWaitlistSubmit}
+                className="mx-auto mt-10 flex max-w-xl flex-col gap-3 sm:flex-row sm:items-center"
+              >
+                <input
+                  type="email"
+                  value={waitlistEmail}
+                  onChange={(event) => {
+                    setWaitlistEmail(event.target.value);
+                    setError(null);
+                  }}
+                  placeholder="tu@empresa.com"
+                  disabled={loading}
+                  className="w-full rounded-full border border-white/10 bg-slate-900 px-6 py-3 text-sm text-slate-100 placeholder:text-slate-500 transition-colors focus:border-cyan-400 focus:outline-none focus:ring-1 focus:ring-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="inline-flex shrink-0 items-center justify-center rounded-full bg-gradient-to-r from-blue-600 to-cyan-400 px-6 py-3 text-sm font-semibold text-white shadow-[0_0_40px_rgba(8,145,178,0.24)] transition-all duration-300 hover:scale-105 hover:shadow-[0_0_50px_rgba(34,211,238,0.28)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loading ? "Enviando…" : "Unirme a la lista de espera"}
+                </button>
+              </form>
+
+              {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+            </>
+          )}
+        </div>
+      </section>
     </main>
   );
 }
