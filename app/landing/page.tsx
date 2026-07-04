@@ -34,10 +34,7 @@ export default function LandingPage() {
       const response = await fetch("/api/contact", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "lista_espera",
-          email: waitlistEmail.trim(),
-        }),
+        body: JSON.stringify({ type: "lista_espera", email: waitlistEmail }),
       });
 
       const payload = (await response.json()) as {
