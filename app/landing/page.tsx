@@ -31,7 +31,7 @@ export default function LandingPage() {
     setError(null);
 
     try {
-      const response = await fetch("/api/contact", {
+      const response = await fetch(`${window.location.origin}/api/contact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "lista_espera", email: waitlistEmail }),
