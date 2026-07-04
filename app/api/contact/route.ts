@@ -160,7 +160,7 @@ export async function POST(request: Request) {
 
     if (leadType === "lista_espera") {
       const { error: sendError } = await resend.emails.send({
-        from: `ElevateX <${RESEND_FROM_EMAIL}>`,
+        from: "ElevateX Lista de Espera <onboarding@resend.dev>",
         to: [LEAD_RECIPIENT_EMAIL],
         replyTo: email,
         subject: `📋 Lista de espera ElevateX: ${email}`,
