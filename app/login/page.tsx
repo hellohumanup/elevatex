@@ -9,6 +9,28 @@ import { createClientComponentClient } from "@/lib/supabase/auth-helpers-nextjs-
 
 type AuthMode = "login" | "register";
 
+function toErrorMessage(value: unknown): string {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+
+  if (value instanceof Error && value.message.trim()) {
+    return value.message.trim();
+  }
+
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "message" in value &&
+    typeof (value as { message: unknown }).message === "string" &&
+    (value as { message: string }).message.trim()
+  ) {
+    return (value as { message: string }).message.trim();
+  }
+
+  return "Error al procesar la solicitud";
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const supabase = useMemo(() => createClientComponentClient(), []);
@@ -29,6 +51,11 @@ export default function LoginPage() {
     setIsSubmitting(false);
   }
 
+  function showAuthError(err: unknown) {
+    const message = toErrorMessage(err);
+    setError(translateAuthError(message) || "Error al procesar la solicitud");
+  }
+
   async function redirectToDashboard() {
     setInfo("Acceso correcto. Redirigiendo al panel…");
     router.refresh();
@@ -38,9 +65,9 @@ export default function LoginPage() {
   async function handleAuth(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    const name = fullName.trim();
+    const orgName = companyName.trim();
     const normalizedEmail = email.trim().toLowerCase();
-    const normalizedFullName = fullName.trim();
-    const normalizedCompanyName = companyName.trim();
 
     if (!normalizedEmail || !password) {
       setError("Introduce tu email y contraseña.");
@@ -48,13 +75,8 @@ export default function LoginPage() {
     }
 
     if (mode === "register") {
-      if (!normalizedFullName) {
+      if (!name) {
         setError("Introduce tu nombre completo.");
-        return;
-      }
-
-      if (!normalizedCompanyName) {
-        setError("Introduce el nombre de tu empresa u organización.");
         return;
       }
 
@@ -77,7 +99,7 @@ export default function LoginPage() {
           });
 
         if (signInError) {
-          setError(translateAuthError(signInError.message));
+          showAuthError(signInError.message || "Error al procesar la solicitud");
           return;
         }
 
@@ -95,28 +117,24 @@ export default function LoginPage() {
         password,
         options: {
           data: {
-            full_name: normalizedFullName,
-            company_name: normalizedCompanyName,
-            organization_name: normalizedCompanyName,
+            full_name: name || "",
+            organization_name: orgName || "Mi Organización",
           },
         },
       });
 
       if (signUpError) {
-        setError(translateAuthError(signUpError.message));
+        showAuthError(signUpError.message || "Error al procesar la solicitud");
         return;
       }
 
       // Supabase a veces devuelve user sin identities cuando el email ya existe.
       const alreadyRegistered =
-        Array.isArray(data.user?.identities) && data.user.identities.length === 0;
+        Array.isArray(data.user?.identities) &&
+        data.user.identities.length === 0;
 
       if (alreadyRegistered) {
-        setError(
-          translateAuthError(
-            "User already registered. Please sign in instead.",
-          ),
-        );
+        showAuthError("User already registered. Please sign in instead.");
         setMode("login");
         return;
       }
@@ -127,17 +145,22 @@ export default function LoginPage() {
         return;
       }
 
-      // Cuenta creada: hace falta confirmar email antes de entrar.
-      setInfo(
-        "Cuenta creada. Revisa tu email para confirmarla e inicia sesión.",
-      );
-      setMode("login");
-      setPassword("");
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error
-          ? translateAuthError(caughtError.message)
-          : "Error inesperado al autenticar.",
+      // Éxito sin sesión: requiere confirmación por email.
+      if (data.user) {
+        setInfo(
+          "Cuenta creada correctamente. Revisa tu email para confirmarla e inicia sesión.",
+        );
+        setMode("login");
+        setPassword("");
+        return;
+      }
+
+      setError("Error al procesar la solicitud");
+    } catch (err) {
+      showAuthError(
+        err instanceof Error
+          ? err.message || "Error al procesar la solicitud"
+          : "Error al procesar la solicitud",
       );
     } finally {
       setIsSubmitting(false);
@@ -154,7 +177,7 @@ export default function LoginPage() {
           Acceso al panel B2B de Vínculo
         </p>
 
-        {error ? (
+        {typeof error === "string" && error ? (
           <p
             role="alert"
             className="mt-6 rounded-lg border border-red-200/80 bg-red-50/80 px-4 py-3 text-sm text-red-700 backdrop-blur-sm"
@@ -163,7 +186,7 @@ export default function LoginPage() {
           </p>
         ) : null}
 
-        {info ? (
+        {typeof info === "string" && info ? (
           <p
             role="status"
             className="mt-6 rounded-lg border border-slate-200/80 bg-slate-50/80 px-4 py-3 text-sm text-slate-700 backdrop-blur-sm"
@@ -206,12 +229,11 @@ export default function LoginPage() {
                   id="companyName"
                   type="text"
                   autoComplete="organization"
-                  required
                   value={companyName}
                   onChange={(event) => setCompanyName(event.target.value)}
                   disabled={isSubmitting}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-60"
-                  placeholder="Mi Empresa S.L."
+                  placeholder="Mi Organización"
                 />
               </div>
             </>
