@@ -9,6 +9,9 @@ import { createClientComponentClient } from "@/lib/supabase/auth-helpers-nextjs-
 
 type AuthMode = "login" | "register";
 
+const REGISTER_SERVER_ERROR_MESSAGE =
+  "No se pudo completar el registro. Verifica que Email Confirm esté desactivado en Supabase o reintenta en un momento.";
+
 function toErrorMessage(value: unknown): string {
   if (typeof value === "string" && value.trim()) {
     return value.trim();
@@ -22,13 +25,26 @@ function toErrorMessage(value: unknown): string {
     value !== null &&
     typeof value === "object" &&
     "message" in value &&
-    typeof (value as { message: unknown }).message === "string" &&
+    typeof (value as { message?: unknown }).message === "string" &&
     (value as { message: string }).message.trim()
   ) {
     return (value as { message: string }).message.trim();
   }
 
-  return "Error al procesar la solicitud";
+  return "Error al conectar con el servidor de autenticación";
+}
+
+function isServerOrNetworkAuthError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("500") ||
+    normalized.includes("internal server error") ||
+    normalized.includes("unexpected_failure") ||
+    normalized.includes("fetch") ||
+    normalized.includes("network") ||
+    normalized.includes("failed to fetch") ||
+    normalized.includes("conectar con el servidor")
+  );
 }
 
 export default function LoginPage() {
@@ -49,11 +65,6 @@ export default function LoginPage() {
     setError(null);
     setInfo(null);
     setIsSubmitting(false);
-  }
-
-  function showAuthError(err: unknown) {
-    const message = toErrorMessage(err);
-    setError(translateAuthError(message) || "Error al procesar la solicitud");
   }
 
   async function redirectToDashboard() {
@@ -99,7 +110,12 @@ export default function LoginPage() {
           });
 
         if (signInError) {
-          showAuthError(signInError.message || "Error al procesar la solicitud");
+          setError(
+            translateAuthError(
+              signInError?.message ||
+                "Error al conectar con el servidor de autenticación",
+            ),
+          );
           return;
         }
 
@@ -124,7 +140,15 @@ export default function LoginPage() {
       });
 
       if (signUpError) {
-        showAuthError(signUpError.message || "Error al procesar la solicitud");
+        const rawMessage =
+          signUpError?.message ||
+          "Error al conectar con el servidor de autenticación";
+
+        setError(
+          isServerOrNetworkAuthError(rawMessage)
+            ? REGISTER_SERVER_ERROR_MESSAGE
+            : translateAuthError(rawMessage),
+        );
         return;
       }
 
@@ -134,7 +158,11 @@ export default function LoginPage() {
         data.user.identities.length === 0;
 
       if (alreadyRegistered) {
-        showAuthError("User already registered. Please sign in instead.");
+        setError(
+          translateAuthError(
+            "User already registered. Please sign in instead.",
+          ),
+        );
         setMode("login");
         return;
       }
@@ -155,12 +183,19 @@ export default function LoginPage() {
         return;
       }
 
-      setError("Error al procesar la solicitud");
-    } catch (err) {
-      showAuthError(
-        err instanceof Error
-          ? err.message || "Error al procesar la solicitud"
-          : "Error al procesar la solicitud",
+      setError(REGISTER_SERVER_ERROR_MESSAGE);
+    } catch (error) {
+      const rawMessage = toErrorMessage(error);
+
+      setError(
+        mode === "register" && isServerOrNetworkAuthError(rawMessage)
+          ? REGISTER_SERVER_ERROR_MESSAGE
+          : translateAuthError(
+              error instanceof Error
+                ? error.message ||
+                    "Error al conectar con el servidor de autenticación"
+                : "Error al conectar con el servidor de autenticación",
+            ),
       );
     } finally {
       setIsSubmitting(false);
@@ -177,23 +212,23 @@ export default function LoginPage() {
           Acceso al panel B2B de Vínculo
         </p>
 
-        {typeof error === "string" && error ? (
-          <p
+        {error && typeof error === "string" && (
+          <div
             role="alert"
             className="mt-6 rounded-lg border border-red-200/80 bg-red-50/80 px-4 py-3 text-sm text-red-700 backdrop-blur-sm"
           >
             {error}
-          </p>
-        ) : null}
+          </div>
+        )}
 
-        {typeof info === "string" && info ? (
-          <p
+        {info && typeof info === "string" && (
+          <div
             role="status"
             className="mt-6 rounded-lg border border-slate-200/80 bg-slate-50/80 px-4 py-3 text-sm text-slate-700 backdrop-blur-sm"
           >
             {info}
-          </p>
-        ) : null}
+          </div>
+        )}
 
         <form onSubmit={handleAuth} className="mt-6 space-y-4">
           {mode === "register" ? (
