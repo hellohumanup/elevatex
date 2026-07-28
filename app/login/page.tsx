@@ -1,13 +1,13 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { translateAuthError } from "@/lib/supabase/auth-errors";
 import { createClientComponentClient } from "@/lib/supabase/auth-helpers-nextjs-shim";
 
 type AuthMode = "login" | "register";
-
-export const dynamic = "force-dynamic";
 
 export default function LoginPage() {
   const router = useRouter();

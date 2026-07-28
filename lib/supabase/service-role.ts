@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { FALLBACK_TEST_TENANT_ID as CANONICAL_FALLBACK_TEST_TENANT_ID } from "@/lib/groups";
+import { resolveSupabaseUrl } from "@/lib/supabase/env";
 
 export type { Database } from "@/lib/supabase/database.types";
 
@@ -11,10 +12,10 @@ export const FALLBACK_TEST_TENANT_ID = CANONICAL_FALLBACK_TEST_TENANT_ID;
 export const LOCAL_DEV_TENANT_ID = FALLBACK_TEST_TENANT_ID;
 
 export function createSupabaseServiceRoleClient(): SupabaseClient | null {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseUrl = resolveSupabaseUrl();
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
 
-  if (!supabaseUrl || !serviceRoleKey) {
+  if (!serviceRoleKey) {
     return null;
   }
 

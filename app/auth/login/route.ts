@@ -1,16 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-
-function getSupabaseEnv() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return null;
-  }
-
-  return { supabaseUrl, supabaseAnonKey };
-}
+import { getSupabaseEnv } from "@/lib/supabase/env";
 
 function translateAuthError(message: string): string {
   const normalized = message.toLowerCase();
@@ -28,16 +18,6 @@ function translateAuthError(message: string): string {
 
 export async function POST(request: NextRequest) {
   const env = getSupabaseEnv();
-
-  if (!env) {
-    return NextResponse.json(
-      {
-        error:
-          "Faltan NEXT_PUBLIC_SUPABASE_URL o NEXT_PUBLIC_SUPABASE_ANON_KEY en el servidor.",
-      },
-      { status: 500 },
-    );
-  }
 
   let body: { email?: string; password?: string };
 
