@@ -31,6 +31,15 @@ type SendResult = {
   error?: string;
 };
 
+type SendInvitesRequestBody = {
+  groupId?: string;
+  participants?: Array<{
+    id?: string;
+    name?: string | null;
+    email?: string | null;
+  }>;
+};
+
 function isValidEmail(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim().includes("@");
 }
@@ -43,6 +52,15 @@ function sanitizeEmail(raw: string): string {
     .replace(/\s+/g, "")
     .toLowerCase()
     .trim();
+}
+
+function extractEmailAddress(value: string): string {
+  const match = value.match(/<([^>]+)>/);
+  return sanitizeEmail(match?.[1] ?? value);
+}
+
+function isResendSandboxOwnEmailError(message: string): boolean {
+  return message.toLowerCase().includes("can only send to your own email address");
 }
 
 /**
@@ -93,10 +111,10 @@ async function ensureParticipantMagicToken(
 
 export async function POST(request: Request) {
   try {
-    let body: { groupId?: string };
+    let body: SendInvitesRequestBody;
 
     try {
-      body = (await request.json()) as { groupId?: string };
+      body = (await request.json()) as SendInvitesRequestBody;
     } catch {
       return NextResponse.json(
         { success: false, error: "Petición no válida." },
@@ -106,6 +124,13 @@ export async function POST(request: Request) {
 
     const groupId =
       typeof body.groupId === "string" ? body.groupId.trim() : "";
+    const requestedParticipantIds = Array.isArray(body.participants)
+      ? body.participants
+          .map((participant) =>
+            typeof participant?.id === "string" ? participant.id.trim() : "",
+          )
+          .filter(Boolean)
+      : [];
 
     if (!groupId) {
       return NextResponse.json(
@@ -164,7 +189,12 @@ export async function POST(request: Request) {
       throw new Error(participantsError.message);
     }
 
-    const participants = participantRows ?? [];
+    const participants =
+      requestedParticipantIds.length > 0
+        ? (participantRows ?? []).filter((participant) =>
+            requestedParticipantIds.includes(String(participant.id)),
+          )
+        : (participantRows ?? []);
     const groupName =
       typeof group.name === "string" && group.name.trim().length > 0
         ? group.name.trim()
@@ -178,6 +208,10 @@ export async function POST(request: Request) {
     const fromAddress =
       process.env.RESEND_FROM_EMAIL?.trim() ||
       "Vínculo <onboarding@resend.dev>";
+    const sandboxAllowedEmail = sanitizeEmail(
+      process.env.RESEND_SANDBOX_EMAIL?.trim() ||
+        extractEmailAddress(fromAddress),
+    );
 
     if (simulateOnly) {
       console.warn(
@@ -291,6 +325,23 @@ export async function POST(request: Request) {
             magicUrl,
           });
         } else {
+          if (email !== sandboxAllowedEmail) {
+            const sandboxErrorMessage =
+              `Sandbox de Resend activo: solo puedes enviar a ${sandboxAllowedEmail}. Destino recibido: ${email}.`;
+            console.error("❌ [Resend Error]:", {
+              message: sandboxErrorMessage,
+              email,
+              sandboxAllowedEmail,
+            });
+            return NextResponse.json(
+              {
+                success: false,
+                error: sandboxErrorMessage,
+              },
+              { status: 400 },
+            );
+          }
+
           const { data, error: sendError } = await resend!.emails.send({
             from: fromAddress,
             to: email,
@@ -299,11 +350,16 @@ export async function POST(request: Request) {
           });
 
           if (sendError) {
+            const resendErrorMessage = isResendSandboxOwnEmailError(
+              sendError.message,
+            )
+              ? `Sandbox de Resend activo: solo puedes enviar a ${sandboxAllowedEmail}. ${sendError.message}`
+              : sendError.message;
             console.error("❌ [Resend Error]:", sendError);
             return NextResponse.json(
               {
                 success: false,
-                error: sendError.message,
+                error: resendErrorMessage,
               },
               { status: 400 },
             );
@@ -352,6 +408,11 @@ export async function POST(request: Request) {
 
     const processed = sent + simulated;
 
+    console.log("📧 [Invitaciones Enviadas]:", {
+      count: participants.length,
+      status: "success",
+    });
+
     return NextResponse.json(
       {
         success: true,
@@ -365,6 +426,7 @@ export async function POST(request: Request) {
         skipped,
         failed,
         total: participants.length,
+        requestedParticipants: requestedParticipantIds.length,
         usedSimulation: simulateOnly,
         results,
       },

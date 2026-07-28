@@ -1,8 +1,6 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import {
-  buildFallbackTeamDiagnosisMarkdown,
-  generateTeamDiagnosisPrompt,
   type TeamDiagnosisPromptInput,
   type TeamFragmentationMetric,
   type TeamInfluenceLeader,
@@ -16,31 +14,39 @@ import type {
 export const dynamic = "force-dynamic";
 
 const OPENAI_MODEL = "gpt-4o-mini";
-const USER_PROMPT =
-  "Redacta el diagnóstico ejecutivo de este equipo en Markdown, con tono de Consultor Senior de HR.";
 
-/** Análisis estructurado que consume la vista de resultados. */
-type AiDiagnosisAnalysis = {
-  diagnosis: string;
-  summary: string;
-  metrics: {
-    density: number;
-    reciprocityRate: number;
-    rosterSize: number;
-    isolatedCount: number;
-    topInfluencerCount: number;
-    betweennessLeaderCount: number;
-  };
+/** Diagnóstico ejecutivo estructurado (contrato JSON para la UI). */
+export type ExecutiveDiagnosisReport = {
+  resumen_ejecutivo: string;
+  puntos_fuertes: string[];
+  riesgos_detectados: string[];
+  recomendaciones_accionables: string[];
 };
+
+const HR_SYSTEM_PROMPT = `Eres un Consultor Senior de HR especializado en People Analytics, Organizational Network Analysis (ONA) y clima laboral corporativo.
+
+Tu audiencia son directivos de RR.HH. y líderes de negocio. Debes analizar:
+- Densidad de la red (cohesión relacional)
+- Reciprocidad (confianza mutua)
+- Nodos aislados (riesgo de desconexión / silos humanos)
+- Nodos puente / betweenness (conectores informales críticos)
+
+Responde ÚNICAMENTE con un JSON válido en español, sin markdown ni texto adicional, con esta estructura exacta:
+{
+  "resumen_ejecutivo": "string (1 párrafo, máximo 120 palabras)",
+  "puntos_fuertes": ["string", "..."],
+  "riesgos_detectados": ["string", "..."],
+  "recomendaciones_accionables": ["string", "..."]
+}`;
 
 type AiDiagnosisSuccessResponse = {
   success: true;
+  groupId?: string;
+  report: ExecutiveDiagnosisReport;
+  /** Markdown derivado del JSON para compatibilidad con render legacy. */
   diagnosis: string;
-  analysis: AiDiagnosisAnalysis;
-  systemPrompt: string;
   usedFallback: boolean;
   model: string | null;
-  groupId?: string;
 };
 
 type AiDiagnosisErrorResponse = {
@@ -355,44 +361,151 @@ function parseAiDiagnosisRequestBody(
   };
 }
 
-function buildAnalysisEnvelope(
-  diagnosis: string,
-  payload: TeamDiagnosisPromptInput,
-  body: Record<string, unknown>,
-): AiDiagnosisAnalysis {
-  const densityPercent = payload.density.densityPercent;
-  const reciprocityRate = payload.reciprocityRate ?? 0;
-  const rosterSize = Number(
-    body.rosterSize ?? payload.density.nodeCount ?? 0,
-  );
-  const isolatedCount = payload.isolatedParticipants?.length ?? 0;
-  const topInfluencerCount = payload.topInfluencers?.length ?? 0;
-  const betweennessLeaderCount = Array.isArray(body.betweennessLeaders)
-    ? body.betweennessLeaders.length
-    : 0;
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
 
-  const summary = [
-    `Densidad ${densityPercent.toFixed(1)}%`,
-    `reciprocidad ${reciprocityRate.toFixed(1)}%`,
-    `${isolatedCount} aislado(s)`,
-    `${topInfluencerCount} influencer(s)`,
-  ].join(" · ");
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+}
+
+function parseExecutiveDiagnosisReport(raw: string): ExecutiveDiagnosisReport {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("OpenAI devolvió JSON inválido.");
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error("OpenAI devolvió un objeto JSON inválido.");
+  }
+
+  const resumen_ejecutivo =
+    typeof parsed.resumen_ejecutivo === "string"
+      ? parsed.resumen_ejecutivo.trim()
+      : "";
+
+  if (!resumen_ejecutivo) {
+    throw new Error("OpenAI devolvió un informe sin resumen_ejecutivo.");
+  }
 
   return {
-    diagnosis,
-    summary,
-    metrics: {
-      density: densityPercent,
-      reciprocityRate,
-      rosterSize: Number.isFinite(rosterSize) ? Math.max(0, Math.floor(rosterSize)) : 0,
-      isolatedCount,
-      topInfluencerCount,
-      betweennessLeaderCount,
-    },
+    resumen_ejecutivo,
+    puntos_fuertes: parseStringArray(parsed.puntos_fuertes),
+    riesgos_detectados: parseStringArray(parsed.riesgos_detectados),
+    recomendaciones_accionables: parseStringArray(
+      parsed.recomendaciones_accionables,
+    ),
   };
 }
 
-async function generateDiagnosisWithOpenAI(systemPrompt: string): Promise<string> {
+function formatExecutiveReportToMarkdown(
+  report: ExecutiveDiagnosisReport,
+): string {
+  const list = (title: string, items: string[]) =>
+    items.length > 0
+      ? `## ${title}\n${items.map((item) => `- ${item}`).join("\n")}`
+      : `## ${title}\n- Sin hallazgos destacados en esta categoría.`;
+
+  return [
+    "## Resumen ejecutivo",
+    report.resumen_ejecutivo,
+    list("Puntos fuertes", report.puntos_fuertes),
+    list("Riesgos detectados", report.riesgos_detectados),
+    list("Recomendaciones accionables", report.recomendaciones_accionables),
+  ].join("\n\n");
+}
+
+function buildMetricsContextForOpenAI(
+  payload: TeamDiagnosisPromptInput,
+  body: Record<string, unknown>,
+): string {
+  const betweennessLeaders = Array.isArray(body.betweennessLeaders)
+    ? body.betweennessLeaders
+    : [];
+
+  return JSON.stringify(
+    {
+      groupId:
+        typeof body.groupId === "string" ? body.groupId.trim() : undefined,
+      teamName: payload.teamName ?? undefined,
+      metrics: {
+        densityPercent: payload.density.densityPercent,
+        reciprocityRate: payload.reciprocityRate ?? 0,
+        rosterSize: Number(body.rosterSize ?? payload.density.nodeCount ?? 0),
+        isolatedParticipants: payload.isolatedParticipants ?? [],
+        topInfluencers: payload.topInfluencers ?? [],
+        betweennessLeaders,
+        fragmentationIndex: payload.fragmentation.index,
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function buildFallbackExecutiveReport(
+  payload: TeamDiagnosisPromptInput,
+  body: Record<string, unknown>,
+): ExecutiveDiagnosisReport {
+  const densityPercent = payload.density.densityPercent;
+  const reciprocityRate = payload.reciprocityRate ?? 0;
+  const isolated = payload.isolatedParticipants ?? [];
+  const influencers = payload.topInfluencers ?? [];
+  const bridges = Array.isArray(body.betweennessLeaders)
+    ? body.betweennessLeaders
+    : [];
+
+  const bridgeNames = bridges
+    .slice(0, 3)
+    .map((item) =>
+      isRecord(item) && typeof item.name === "string" ? item.name : null,
+    )
+    .filter(Boolean) as string[];
+
+  return {
+    resumen_ejecutivo: `El equipo presenta una densidad del ${densityPercent.toFixed(1)}% y una reciprocidad del ${reciprocityRate.toFixed(1)}%. Este informe de prueba resume la lectura relacional del grupo para apoyar decisiones de clima laboral y ONA.`,
+    puntos_fuertes: [
+      reciprocityRate >= 40
+        ? "La reciprocidad sugiere vínculos bidireccionales activos en parte de la red."
+        : "Existen referentes informales identificables que pueden anclar iniciativas de equipo.",
+      influencers.length > 0
+        ? `Referentes de influencia detectados: ${influencers
+            .slice(0, 3)
+            .map((person) => person.name)
+            .join(", ")}.`
+        : "La red conserva margen para reforzar conectores informales.",
+    ],
+    riesgos_detectados: [
+      isolated.length > 0
+        ? `${isolated.length} colaborador(es) aislado(s): ${isolated
+            .slice(0, 4)
+            .map((person) => person.name)
+            .join(", ")}.`
+        : "No se detectaron aislados severos en esta muestra.",
+      densityPercent < 35
+        ? "Densidad baja: riesgo de fragmentación y silos informales."
+        : "Monitorizar cohesión si crece la rotación o el trabajo remoto.",
+    ],
+    recomendaciones_accionables: [
+      bridgeNames.length > 0
+        ? `Involucrar a nodos puente (${bridgeNames.join(", ")}) en rituales de alineación cross-funcional.`
+        : "Identificar y empoderar conectores informales en talleres de colaboración.",
+      isolated.length > 0
+        ? "Diseñar onboarding relacional y buddy system para perfiles aislados."
+        : "Mantener pulse checks trimestrales de clima y red.",
+      "Revisar este diagnóstico con el comité de People Analytics antes de acciones estructurales.",
+    ],
+  };
+}
+
+async function generateExecutiveDiagnosisWithOpenAI(
+  metricsContext: string,
+): Promise<ExecutiveDiagnosisReport> {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
 
   if (!apiKey) {
@@ -406,20 +519,24 @@ async function generateDiagnosisWithOpenAI(systemPrompt: string): Promise<string
   const completion = await openai.chat.completions.create({
     model: OPENAI_MODEL,
     temperature: 0.4,
-    max_tokens: 1100,
+    max_tokens: 1200,
+    response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: USER_PROMPT },
+      { role: "system", content: HR_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `Analiza estas métricas ONA del equipo y genera el diagnóstico ejecutivo en JSON:\n${metricsContext}`,
+      },
     ],
   });
 
-  const diagnosis = completion.choices[0]?.message?.content?.trim();
+  const raw = completion.choices[0]?.message?.content?.trim();
 
-  if (!diagnosis) {
+  if (!raw) {
     throw new Error("OpenAI devolvió una respuesta vacía.");
   }
 
-  return diagnosis;
+  return parseExecutiveDiagnosisReport(raw);
 }
 
 function resolveOpenAiErrorMessage(error: unknown): string {
@@ -495,14 +612,25 @@ export async function POST(request: Request) {
   const requestGroupId =
     typeof body.groupId === "string" ? body.groupId.trim() : undefined;
 
+  const metricsContext = buildMetricsContextForOpenAI(payload, body);
+
+  console.log("[api/ai-diagnosis] Métricas recibidas:", {
+    groupId: requestGroupId,
+    density: payload.density.densityPercent,
+    reciprocityRate: payload.reciprocityRate,
+    isolatedCount: payload.isolatedParticipants?.length ?? 0,
+    betweennessCount: Array.isArray(body.betweennessLeaders)
+      ? body.betweennessLeaders.length
+      : 0,
+  });
+
   try {
-    const systemPrompt = await generateTeamDiagnosisPrompt(payload);
     const hasOpenAiKey = Boolean(process.env.OPENAI_API_KEY?.trim());
 
     // Sin clave: mock/fallback estructurado para no romper la UI en tests/local.
     if (!hasOpenAiKey) {
-      const diagnosis = buildFallbackTeamDiagnosisMarkdown(payload);
-      const analysis = buildAnalysisEnvelope(diagnosis, payload, body);
+      const report = buildFallbackExecutiveReport(payload, body);
+      const diagnosis = formatExecutiveReportToMarkdown(report);
 
       console.warn(
         "[api/ai-diagnosis] OPENAI_API_KEY ausente — devolviendo informe de prueba.",
@@ -511,9 +639,8 @@ export async function POST(request: Request) {
 
       return NextResponse.json({
         success: true,
+        report,
         diagnosis,
-        analysis,
-        systemPrompt,
         usedFallback: true,
         model: null,
         ...(requestGroupId ? { groupId: requestGroupId } : {}),
@@ -521,14 +648,13 @@ export async function POST(request: Request) {
     }
 
     try {
-      const diagnosis = await generateDiagnosisWithOpenAI(systemPrompt);
-      const analysis = buildAnalysisEnvelope(diagnosis, payload, body);
+      const report = await generateExecutiveDiagnosisWithOpenAI(metricsContext);
+      const diagnosis = formatExecutiveReportToMarkdown(report);
 
       return NextResponse.json({
         success: true,
+        report,
         diagnosis,
-        analysis,
-        systemPrompt,
         usedFallback: false,
         model: OPENAI_MODEL,
         ...(requestGroupId ? { groupId: requestGroupId } : {}),
@@ -538,14 +664,13 @@ export async function POST(request: Request) {
         groupId: requestGroupId,
       });
 
-      const diagnosis = `${buildFallbackTeamDiagnosisMarkdown(payload)}\n\n> *Nota: se usó informe de prueba tras error de OpenAI (${resolveOpenAiErrorMessage(openAiError)}).*`;
-      const analysis = buildAnalysisEnvelope(diagnosis, payload, body);
+      const report = buildFallbackExecutiveReport(payload, body);
+      const diagnosis = `${formatExecutiveReportToMarkdown(report)}\n\n> *Nota: se usó informe de prueba tras error de OpenAI (${resolveOpenAiErrorMessage(openAiError)}).*`;
 
       return NextResponse.json({
         success: true,
+        report,
         diagnosis,
-        analysis,
-        systemPrompt,
         usedFallback: true,
         model: null,
         ...(requestGroupId ? { groupId: requestGroupId } : {}),

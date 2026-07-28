@@ -1004,114 +1004,34 @@ export default function SociometricNativeQuestionnaire({
     started_at: string | null;
     completed_at: string;
   }): Promise<void> {
-    const buildResponseRow = (options: {
-      includeRespondentColumn: boolean;
-      includeTimestamps: boolean;
-    }): Record<string, unknown> => {
-      const row: Record<string, unknown> = {
-        survey_id: activeSurveyId,
-        participant_id: input.participantId,
+    const response = await fetch("/api/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        surveyId: activeSurveyId,
+        participantId: input.participantId,
+        respondentName: input.respondentName,
         answers: input.answersPayload,
-        group_id: input.groupIdForInsert,
-      };
+        groupId: input.groupIdForInsert,
+        started_at: input.started_at,
+        completed_at: input.completed_at,
+      }),
+    });
 
-      if (options.includeRespondentColumn) {
-        row.respondent_name = input.respondentName;
-      }
-
-      if (options.includeTimestamps) {
-        if (input.started_at) {
-          row.started_at = input.started_at;
-        }
-        row.completed_at = input.completed_at;
-      }
-
-      return row;
-    };
-
-    const tryInsert = async (
-      row: Record<string, unknown>,
-    ): Promise<{ error: { message: string } | null }> => {
-      const { error } = await supabase.from("responses").insert(row);
-      return { error };
-    };
-
-    const insertVariants: Array<{
-      includeRespondentColumn: boolean;
-      includeTimestamps: boolean;
-    }> = [
-      { includeRespondentColumn: true, includeTimestamps: true },
-      { includeRespondentColumn: false, includeTimestamps: true },
-      { includeRespondentColumn: true, includeTimestamps: false },
-      { includeRespondentColumn: false, includeTimestamps: false },
-    ];
+    let payload: { success?: boolean; error?: string };
 
     try {
-      for (let index = 0; index < insertVariants.length; index += 1) {
-        const variant = insertVariants[index];
-        const row = buildResponseRow(variant);
-        const { error: insertError } = await tryInsert(row);
+      payload = (await response.json()) as typeof payload;
+    } catch {
+      throw new Error(
+        `La API de responses devolvió una respuesta no válida (HTTP ${response.status}).`,
+      );
+    }
 
-        if (!insertError) {
-          return;
-        }
-
-        const isLastVariant = index === insertVariants.length - 1;
-        const canRetry =
-          !isLastVariant &&
-          (isRespondentNameColumnError(insertError.message) ||
-            isResponseTimestampColumnError(insertError.message) ||
-            isResponsesSchemaCacheError(insertError.message));
-
-        if (!canRetry) {
-          if (IS_LOCAL_DEV && index === 0) {
-            console.warn(
-              "[EDT Questionnaire] Dev bypass: reintentando responses con payload mínimo:",
-              insertError.message,
-            );
-
-            const { error: devFallbackError } = await tryInsert({
-              survey_id: activeSurveyId,
-              participant_id: input.participantId,
-              group_id: input.groupIdForInsert,
-              answers: input.answersPayload,
-            });
-
-            if (!devFallbackError) {
-              return;
-            }
-
-            throw new Error(devFallbackError.message);
-          }
-
-          throw new Error(insertError.message);
-        }
-
-        console.warn(
-          "[EDT Questionnaire] Fallback de inserción en responses:",
-          insertError.message,
-        );
-      }
-    } catch (persistError) {
-      if (
-        persistError instanceof Error &&
-        (isRespondentNameColumnError(persistError.message) ||
-          isResponseTimestampColumnError(persistError.message))
-      ) {
-        const { error: fallbackError } = await tryInsert(
-          buildResponseRow({
-            includeRespondentColumn: false,
-            includeTimestamps: false,
-          }),
-        );
-        if (fallbackError) {
-          throw new Error(fallbackError.message);
-        }
-
-        return;
-      }
-
-      throw persistError;
+    if (!response.ok || !payload.success) {
+      throw new Error(
+        payload.error ?? "No se pudo guardar la respuesta del cuestionario.",
+      );
     }
   }
 

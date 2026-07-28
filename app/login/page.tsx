@@ -7,6 +7,8 @@ import { createClientComponentClient } from "@/lib/supabase/auth-helpers-nextjs-
 
 type AuthMode = "login" | "register";
 
+export const dynamic = "force-dynamic";
+
 export default function LoginPage() {
   const router = useRouter();
   const supabase = useMemo(() => createClientComponentClient(), []);

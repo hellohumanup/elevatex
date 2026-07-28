@@ -136,6 +136,30 @@ function renderExecutiveMarkdown(markdown: string): string {
     .join("\n");
 }
 
+type ExecutiveDiagnosisReport = {
+  resumen_ejecutivo: string;
+  puntos_fuertes: string[];
+  riesgos_detectados: string[];
+  recomendaciones_accionables: string[];
+};
+
+function formatExecutiveReportToMarkdown(
+  report: ExecutiveDiagnosisReport,
+): string {
+  const section = (title: string, items: string[]) =>
+    items.length > 0
+      ? `## ${title}\n${items.map((item) => `- ${item}`).join("\n")}`
+      : `## ${title}\n- Sin hallazgos destacados en esta categoría.`;
+
+  return [
+    "## Resumen ejecutivo",
+    report.resumen_ejecutivo,
+    section("Puntos fuertes", report.puntos_fuertes),
+    section("Riesgos detectados", report.riesgos_detectados),
+    section("Recomendaciones accionables", report.recomendaciones_accionables),
+  ].join("\n\n");
+}
+
 type Participant = {
   id: string;
   name: string;
@@ -1708,10 +1732,7 @@ export default function ResultadosPage() {
         success?: boolean;
         error?: string;
         diagnosis?: string;
-        analysis?: {
-          diagnosis?: string;
-          summary?: string;
-        };
+        report?: ExecutiveDiagnosisReport;
         usedFallback?: boolean;
         model?: string | null;
       };
@@ -1735,9 +1756,8 @@ export default function ResultadosPage() {
         (typeof data.diagnosis === "string" && data.diagnosis.trim().length > 0
           ? data.diagnosis.trim()
           : null) ??
-        (typeof data.analysis?.diagnosis === "string" &&
-        data.analysis.diagnosis.trim().length > 0
-          ? data.analysis.diagnosis.trim()
+        (data.report
+          ? formatExecutiveReportToMarkdown(data.report)
           : null);
 
       if (!diagnosisText) {
@@ -1755,6 +1775,7 @@ export default function ResultadosPage() {
         model: data.model,
         usedFallback: data.usedFallback ?? false,
         chars: diagnosisText.length,
+        report: data.report ?? null,
         payloadKeys: Object.keys(metricsPayload),
       });
     } catch (err) {
@@ -1923,7 +1944,7 @@ export default function ResultadosPage() {
                         Generando diagnóstico ejecutivo…
                       </>
                     ) : (
-                      "✨ Generar Diagnóstico Ejecutivo de IA"
+                      "Generar Diagnóstico por IA"
                     )}
                   </button>
                   {!demoModeEnabled && (

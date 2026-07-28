@@ -257,13 +257,21 @@ export default function GroupPage() {
 
     try {
       let response: globalThis.Response;
+      const participantsPayload = participants.map((participant) => ({
+        id: participant.id,
+        name: participant.name,
+        email: participant.email,
+      }));
 
       try {
         response = await fetch("/api/send-invites", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
-          body: JSON.stringify({ groupId }),
+          body: JSON.stringify({
+            groupId,
+            participants: participantsPayload,
+          }),
         });
       } catch (networkError) {
         throw new Error(
@@ -318,6 +326,10 @@ export default function GroupPage() {
             ? `${simulated} invitación${simulated === 1 ? "" : "es"} simulada${simulated === 1 ? "" : "s"} en local (revisa la terminal).${failed > 0 ? ` ${failed} con error.` : ""}`
             : `${processed} invitación${processed === 1 ? "" : "es"} procesada${processed === 1 ? "" : "s"} correctamente.${failed > 0 ? ` ${failed} fallida${failed === 1 ? "" : "s"}.` : ""}`;
 
+      console.log("📧 [Invitaciones Enviadas]:", {
+        count: participantsPayload.length,
+        status: "success",
+      });
       setInviteSuccessMessage(successMessage);
       await fetchParticipants();
     } catch (err) {
