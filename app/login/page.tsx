@@ -9,44 +9,6 @@ import { createClientComponentClient } from "@/lib/supabase/auth-helpers-nextjs-
 
 type AuthMode = "login" | "register";
 
-const REGISTER_SERVER_ERROR_MESSAGE =
-  "No se pudo completar el registro. Verifica que Email Confirm esté desactivado en Supabase o reintenta en un momento.";
-
-function toErrorMessage(value: unknown): string {
-  if (typeof value === "string" && value.trim()) {
-    return value.trim();
-  }
-
-  if (value instanceof Error && value.message.trim()) {
-    return value.message.trim();
-  }
-
-  if (
-    value !== null &&
-    typeof value === "object" &&
-    "message" in value &&
-    typeof (value as { message?: unknown }).message === "string" &&
-    (value as { message: string }).message.trim()
-  ) {
-    return (value as { message: string }).message.trim();
-  }
-
-  return "Error al conectar con el servidor de autenticación";
-}
-
-function isServerOrNetworkAuthError(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("500") ||
-    normalized.includes("internal server error") ||
-    normalized.includes("unexpected_failure") ||
-    normalized.includes("fetch") ||
-    normalized.includes("network") ||
-    normalized.includes("failed to fetch") ||
-    normalized.includes("conectar con el servidor")
-  );
-}
-
 export default function LoginPage() {
   const router = useRouter();
   const supabase = useMemo(() => createClientComponentClient(), []);
@@ -70,7 +32,7 @@ export default function LoginPage() {
   async function redirectToDashboard() {
     setInfo("Acceso correcto. Redirigiendo al panel…");
     router.refresh();
-    router.replace("/dashboard");
+    router.push("/dashboard");
   }
 
   async function handleAuth(event: React.FormEvent<HTMLFormElement>) {
@@ -85,16 +47,9 @@ export default function LoginPage() {
       return;
     }
 
-    if (mode === "register") {
-      if (!name) {
-        setError("Introduce tu nombre completo.");
-        return;
-      }
-
-      if (password.length < 6) {
-        setError("La contraseña debe tener al menos 6 caracteres.");
-        return;
-      }
+    if (mode === "register" && !name) {
+      setError("Introduce tu nombre completo.");
+      return;
     }
 
     setIsSubmitting(true);
@@ -112,8 +67,7 @@ export default function LoginPage() {
         if (signInError) {
           setError(
             translateAuthError(
-              signInError?.message ||
-                "Error al conectar con el servidor de autenticación",
+              signInError?.message || "Error al conectar con la autenticación",
             ),
           );
           return;
@@ -128,7 +82,7 @@ export default function LoginPage() {
         return;
       }
 
-      const { data, error: signUpError } = await supabase.auth.signUp({
+      const { data, error: err } = await supabase.auth.signUp({
         email: normalizedEmail,
         password,
         options: {
@@ -139,16 +93,8 @@ export default function LoginPage() {
         },
       });
 
-      if (signUpError) {
-        const rawMessage =
-          signUpError?.message ||
-          "Error al conectar con el servidor de autenticación";
-
-        setError(
-          isServerOrNetworkAuthError(rawMessage)
-            ? REGISTER_SERVER_ERROR_MESSAGE
-            : translateAuthError(rawMessage),
-        );
+      if (err) {
+        setError(err?.message || "Error al crear la cuenta. Inténtalo de nuevo.");
         return;
       }
 
@@ -159,21 +105,20 @@ export default function LoginPage() {
 
       if (alreadyRegistered) {
         setError(
-          translateAuthError(
-            "User already registered. Please sign in instead.",
-          ),
+          "Este email ya está registrado. Inicia sesión o recupera tu contraseña.",
         );
         setMode("login");
         return;
       }
 
-      // Sesión inmediata (confirmación de email desactivada).
+      // Éxito con sesión activa → dashboard inmediato.
       if (data.session?.user) {
-        await redirectToDashboard();
+        router.refresh();
+        router.push("/dashboard");
         return;
       }
 
-      // Éxito sin sesión: requiere confirmación por email.
+      // Éxito con usuario pero sin sesión (confirmación por email).
       if (data.user) {
         setInfo(
           "Cuenta creada correctamente. Revisa tu email para confirmarla e inicia sesión.",
@@ -183,20 +128,13 @@ export default function LoginPage() {
         return;
       }
 
-      setError(REGISTER_SERVER_ERROR_MESSAGE);
-    } catch (error) {
-      const rawMessage = toErrorMessage(error);
-
-      setError(
-        mode === "register" && isServerOrNetworkAuthError(rawMessage)
-          ? REGISTER_SERVER_ERROR_MESSAGE
-          : translateAuthError(
-              error instanceof Error
-                ? error.message ||
-                    "Error al conectar con el servidor de autenticación"
-                : "Error al conectar con el servidor de autenticación",
-            ),
-      );
+      setError("Error al crear la cuenta. Inténtalo de nuevo.");
+    } catch (err) {
+      const message =
+        err instanceof Error && typeof err.message === "string" && err.message
+          ? err.message
+          : "Error al crear la cuenta. Inténtalo de nuevo.";
+      setError(message);
     } finally {
       setIsSubmitting(false);
     }
@@ -213,10 +151,7 @@ export default function LoginPage() {
         </p>
 
         {error && typeof error === "string" && (
-          <div
-            role="alert"
-            className="mt-6 rounded-lg border border-red-200/80 bg-red-50/80 px-4 py-3 text-sm text-red-700 backdrop-blur-sm"
-          >
+          <div className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-600">
             {error}
           </div>
         )}
