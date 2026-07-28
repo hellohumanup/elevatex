@@ -82,58 +82,36 @@ export default function LoginPage() {
         return;
       }
 
-      const { data, error: err } = await supabase.auth.signUp({
-        email: normalizedEmail,
-        password,
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim(),
+        password: password,
         options: {
           data: {
             full_name: name || "",
-            organization_name: orgName || "Mi Organización",
+            organization_name: orgName || "",
           },
         },
       });
 
-      if (err) {
-        setError(err?.message || "Error al crear la cuenta. Inténtalo de nuevo.");
-        return;
-      }
-
-      // Supabase a veces devuelve user sin identities cuando el email ya existe.
-      const alreadyRegistered =
-        Array.isArray(data.user?.identities) &&
-        data.user.identities.length === 0;
-
-      if (alreadyRegistered) {
+      if (error) {
         setError(
-          "Este email ya está registrado. Inicia sesión o recupera tu contraseña.",
+          error?.message ||
+            "Error al conectar con el servidor de autenticación",
         );
-        setMode("login");
         return;
       }
 
-      // Éxito con sesión activa → dashboard inmediato.
-      if (data.session?.user) {
-        router.refresh();
+      if (data.session || data.user) {
         router.push("/dashboard");
         return;
       }
 
-      // Éxito con usuario pero sin sesión (confirmación por email).
-      if (data.user) {
-        setInfo(
-          "Cuenta creada correctamente. Revisa tu email para confirmarla e inicia sesión.",
-        );
-        setMode("login");
-        setPassword("");
-        return;
-      }
-
-      setError("Error al crear la cuenta. Inténtalo de nuevo.");
+      setError("Error al conectar con el servidor de autenticación");
     } catch (err) {
       const message =
         err instanceof Error && typeof err.message === "string" && err.message
           ? err.message
-          : "Error al crear la cuenta. Inténtalo de nuevo.";
+          : "Error al conectar con el servidor de autenticación";
       setError(message);
     } finally {
       setIsSubmitting(false);
