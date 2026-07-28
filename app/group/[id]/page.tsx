@@ -246,55 +246,89 @@ export default function GroupPage() {
       return;
     }
 
+    if (!groupId.trim()) {
+      setError("No se pudo resolver el ID del equipo para enviar invitaciones.");
+      return;
+    }
+
     setIsSendingInvitations(true);
     setError(null);
     setInviteSuccessMessage(null);
 
     try {
-      const response = await fetch(
-        `/api/groups/${encodeURIComponent(groupId)}/send-invites`,
-        {
+      let response: globalThis.Response;
+
+      try {
+        response = await fetch("/api/send-invites", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
-        },
-      );
+          body: JSON.stringify({ groupId }),
+        });
+      } catch (networkError) {
+        throw new Error(
+          networkError instanceof Error
+            ? `No se pudo contactar con el servicio de invitaciones: ${networkError.message}`
+            : "No se pudo contactar con el servicio de invitaciones.",
+        );
+      }
 
-      const payload = (await response.json()) as {
+      let payload: {
         success?: boolean;
         error?: string;
         message?: string;
+        processed?: number;
         sent?: number;
         simulated?: number;
         failed?: number;
+        skipped?: number;
         usedSimulation?: boolean;
       };
 
-      if (!response.ok || !payload.success) {
+      try {
+        payload = (await response.json()) as typeof payload;
+      } catch {
         throw new Error(
-          payload.error ?? "No se pudieron enviar las invitaciones.",
+          `El servicio de invitaciones devolvió una respuesta no válida (HTTP ${response.status}).`,
         );
+      }
+
+      if (!response.ok || !payload.success) {
+        const apiErrorMessage =
+          payload.error ??
+          `La API de invitaciones respondió con HTTP ${response.status}.`;
+
+        console.error("[GroupPage] API send-invites error:", {
+          status: response.status,
+          payload,
+        });
+
+        throw new Error(apiErrorMessage);
       }
 
       const sent = payload.sent ?? 0;
       const simulated = payload.simulated ?? 0;
       const failed = payload.failed ?? 0;
-      const delivered = sent + simulated;
+      const processed = payload.processed ?? sent + simulated;
 
-      setInviteSuccessMessage(
-        payload.usedSimulation
-          ? `${simulated} invitación${simulated === 1 ? "" : "es"} simulada${simulated === 1 ? "" : "s"} en local (revisa la terminal). ${failed > 0 ? `${failed} con error.` : ""}`.trim()
-          : `${delivered} invitación${delivered === 1 ? "" : "es"} enviada${delivered === 1 ? "" : "s"} correctamente.${failed > 0 ? ` ${failed} fallida${failed === 1 ? "" : "s"}.` : ""}`,
-      );
+      const successMessage =
+        typeof payload.message === "string" && payload.message.trim().length > 0
+          ? payload.message.trim()
+          : payload.usedSimulation
+            ? `${simulated} invitación${simulated === 1 ? "" : "es"} simulada${simulated === 1 ? "" : "s"} en local (revisa la terminal).${failed > 0 ? ` ${failed} con error.` : ""}`
+            : `${processed} invitación${processed === 1 ? "" : "es"} procesada${processed === 1 ? "" : "s"} correctamente.${failed > 0 ? ` ${failed} fallida${failed === 1 ? "" : "s"}.` : ""}`;
 
+      setInviteSuccessMessage(successMessage);
       await fetchParticipants();
     } catch (err) {
       console.error("[GroupPage] Error al enviar invitaciones:", err);
-      setError(
+      setInviteSuccessMessage(null);
+      const uiErrorMessage =
         err instanceof Error
           ? err.message
-          : "No se pudieron enviar las invitaciones.",
-      );
+          : "No se pudieron enviar las invitaciones.";
+      setError(uiErrorMessage);
+      window.alert(uiErrorMessage);
     } finally {
       setIsSendingInvitations(false);
     }

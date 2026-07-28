@@ -18,7 +18,7 @@ export type QuestionnaireInviteEmailProps = {
 };
 
 export const QUESTIONNAIRE_INVITE_SUBJECT =
-  "ElevateX — Tu participación en el diagnóstico de equipo";
+  "Invitación a la Dinámica de Equipo en Vínculo";
 
 export function QuestionnaireInviteEmail({
   participantName,
@@ -32,26 +32,27 @@ export function QuestionnaireInviteEmail({
     <Html lang="es">
       <Head />
       <Preview>
-        {safeName}, tu equipo ha iniciado el diagnóstico EDT/ONA en ElevateX.
+        {safeName}, estás invitado/a a la dinámica de equipo de {safeGroup} en
+        Vínculo.
       </Preview>
       <Body style={styles.body}>
         <Container style={styles.container}>
           <Section style={styles.badgeRow}>
-            <Text style={styles.badge}>ElevateX · People Analytics</Text>
+            <Text style={styles.badge}>Vínculo · Dinámica de Equipo</Text>
           </Section>
 
           <Heading style={styles.heading}>Hola, {safeName}</Heading>
 
           <Text style={styles.lead}>
-            El equipo <strong style={styles.strong}>{safeGroup}</strong> ha
-            iniciado el <strong style={styles.strong}>Diagnóstico de Dinámicas de
-            Trabajo (EDT)</strong> y el análisis de red organizacional (ONA).
+            Has sido invitado/a a participar en la{" "}
+            <strong style={styles.strong}>Dinámica de Equipo</strong> del grupo{" "}
+            <strong style={styles.strong}>{safeGroup}</strong> en Vínculo.
           </Text>
 
           <Text style={styles.paragraph}>
             Tu perspectiva es esencial para construir un mapa fiable de
-            colaboración, influencia y cohesión del grupo. El cuestionario es
-            confidencial y toma aproximadamente 10–15 minutos.
+            colaboración, influencia y cohesión. El cuestionario es confidencial
+            y toma aproximadamente 10–15 minutos.
           </Text>
 
           <Section style={styles.ctaSection}>
@@ -65,13 +66,13 @@ export function QuestionnaireInviteEmail({
           <Hr style={styles.hr} />
 
           <Text style={styles.footer}>
-            Este enlace es personal, seguro y de un solo uso. No lo compartas con
-            otras personas. Si no esperabas este correo, puedes ignorarlo con
+            Este enlace es personal y seguro. No lo compartas con otras
+            personas. Si no esperabas este correo, puedes ignorarlo con
             tranquilidad.
           </Text>
 
           <Text style={styles.signature}>
-            ElevateX® · Diagnóstico sistémico para equipos y organizaciones
+            Vínculo · Diagnóstico sistémico para equipos y organizaciones
           </Text>
         </Container>
       </Body>

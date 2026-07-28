@@ -29,7 +29,7 @@ export async function fetchManagerByUserAndOrganization(
 
   const { data, error } = await getSupabase()
     .from("managers")
-    .select("id, user_id, organization_id, name, email")
+    .select("id, user_id, organization_id, role, full_name, name, email")
     .eq("user_id", normalizedUserId)
     .eq("organization_id", normalizedOrgId)
     .order("id", { ascending: true })
@@ -44,7 +44,19 @@ export async function fetchManagerByUserAndOrganization(
     return null;
   }
 
-  return data;
+  if (!data) {
+    return null;
+  }
+
+  // Normaliza alias legacy (`name`) → `full_name` / `role` por defecto.
+  return {
+    ...data,
+    role: data.role ?? "manager",
+    full_name:
+      data.full_name?.trim() ||
+      data.name?.trim() ||
+      "Manager",
+  };
 }
 
 /**

@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
 
   let response = NextResponse.json({
     success: true,
-    redirectTo: "/admin/surveys",
+    redirectTo: "/dashboard",
   });
 
   const supabase = createServerClient(env.supabaseUrl, env.supabaseAnonKey, {

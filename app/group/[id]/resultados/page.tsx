@@ -17,6 +17,9 @@ import {
   AI_MAINTENANCE_MESSAGE,
 } from "@/lib/teamInsights";
 import {
+  buildFallbackTeamDiagnosisMarkdown,
+} from "@/lib/services/aiDiagnosis";
+import {
   buildGraphLinksFromResponses,
   buildGraphNodes,
   buildParticipantNameLookup,
@@ -32,6 +35,7 @@ import {
   normalizeParticipantId,
   parseResponseAnswers,
   resolveParticipantDisplayName,
+  toAiDiagnosisMetricsPayload,
   type CalculatedNetworkMetrics,
   type GraphLink,
   type IndegreeMap,
@@ -65,6 +69,72 @@ const INVALID_GROUP_ID_MESSAGE =
 const RESULTADOS_PDF_EXPORT_ID = "resultados-dashboard-pdf";
 
 const GROUP_NAME_COLUMNS = "id, name";
+
+/** Render Markdown ligero (##, listas, negrita) sin dependencia externa. */
+function renderExecutiveMarkdown(markdown: string): string {
+  const escaped = markdown
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  const withInline = escaped
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(
+      /`([^`]+)`/g,
+      '<code class="break-all rounded bg-slate-100 px-1 py-0.5 text-[0.85em]">$1</code>',
+    );
+
+  const withHeadings = withInline
+    .replace(
+      /^### (.+)$/gm,
+      '<h3 class="mt-5 break-words text-base font-semibold text-slate-900">$1</h3>',
+    )
+    .replace(
+      /^## (.+)$/gm,
+      '<h2 class="mt-6 break-words text-lg font-semibold tracking-tight text-slate-900 first:mt-0">$1</h2>',
+    )
+    .replace(
+      /^> (.+)$/gm,
+      '<p class="mt-3 break-words rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">$1</p>',
+    );
+
+  const withLists = withHeadings.replace(
+    /(?:^|\n)((?:(?:- |\d+\. ).+(?:\n|$))+)/g,
+    (block) => {
+      const lines = block.trim().split("\n").filter(Boolean);
+      const isOrdered = /^\d+\.\s/.test(lines[0] ?? "");
+      const items = lines
+        .map((line) => line.replace(/^(- |\d+\. )/, "").trim())
+        .filter(Boolean)
+        .map(
+          (item) =>
+            `<li class="break-words leading-relaxed">${item}</li>`,
+        )
+        .join("");
+      return isOrdered
+        ? `\n<ol class="mt-3 list-decimal space-y-1.5 pl-5 text-sm text-slate-700">${items}</ol>\n`
+        : `\n<ul class="mt-3 list-disc space-y-1.5 pl-5 text-sm text-slate-700">${items}</ul>\n`;
+    },
+  );
+
+  return withLists
+    .split(/\n{2,}/)
+    .map((chunk) => chunk.trim())
+    .filter(Boolean)
+    .map((chunk) => {
+      if (
+        chunk.startsWith("<h2") ||
+        chunk.startsWith("<h3") ||
+        chunk.startsWith("<ul") ||
+        chunk.startsWith("<ol") ||
+        chunk.startsWith("<p class=")
+      ) {
+        return chunk;
+      }
+      return `<p class="mt-3 break-words text-sm leading-relaxed text-slate-700">${chunk.replace(/\n/g, "<br />")}</p>`;
+    })
+    .join("\n");
+}
 
 type Participant = {
   id: string;
@@ -1165,29 +1235,32 @@ export default function ResultadosPage() {
   /** KPIs ONA del motor puro (`calculateNetworkMetrics`) sobre respuestas hidratadas. */
   const calculatedNetworkMetrics = useMemo((): CalculatedNetworkMetrics => {
     try {
-      return calculateNetworkMetrics(
-        (participants ?? []).map((participant) => ({
-          id: participant.id,
-          name: participant.name,
-        })),
-        (responses ?? [])
-          .filter(
-            (response) =>
-              response.participant_id !== null &&
-              response.participant_id !== undefined,
-          )
-          .map((response) => ({
-            participant_id: response.participant_id as string,
-            answers: response.answers,
-          })),
-      );
+      const roster = (participants ?? []).map((participant) => ({
+        id: participant.id,
+        name: participant.name,
+      }));
+      const responseRows = (responses ?? [])
+        .filter(
+          (response) =>
+            response.participant_id !== null &&
+            response.participant_id !== undefined,
+        )
+        .map((response) => ({
+          participant_id: response.participant_id as string,
+          answers: response.answers,
+        }));
+
+      return calculateNetworkMetrics(roster, responseRows);
     } catch (error) {
       console.error("[resultados] Error en calculateNetworkMetrics:", error);
       return {
         density: 0,
         inDegree: {},
         outDegree: {},
+        degreeCentrality: { in: {}, out: {} },
         reciprocityRate: 0,
+        betweenness: {},
+        betweennessLeaders: [],
         isolatedParticipants: [],
         topInfluencers: [],
       };
@@ -1195,17 +1268,34 @@ export default function ResultadosPage() {
   }, [participants, responses]);
 
   useEffect(() => {
-    console.log("[resultados] KPIs ONA (mathEngine.calculateNetworkMetrics):", {
+    const metrics = {
       density: calculatedNetworkMetrics.density,
       reciprocityRate: calculatedNetworkMetrics.reciprocityRate,
       inDegree: calculatedNetworkMetrics.inDegree,
       outDegree: calculatedNetworkMetrics.outDegree,
       isolatedParticipants: calculatedNetworkMetrics.isolatedParticipants,
       topInfluencers: calculatedNetworkMetrics.topInfluencers,
-      rosterSize: participants?.length ?? 0,
-      responseCount: responses?.length ?? 0,
+      // Contexto del grafo (misma fuente: participants + responses de Supabase).
+      graph: {
+        nodeCount: onaMetrics?.nodes?.length ?? 0,
+        linkCount: onaMetrics?.links?.length ?? 0,
+        densityPercent: onaMetrics?.density?.densityPercent ?? 0,
+        weightedIndegree: onaMetrics?.weightedIndegree ?? {},
+        reciprocity: onaMetrics?.reciprocity ?? {},
+      },
+      input: {
+        participants: participants?.length ?? 0,
+        responses: responses?.length ?? 0,
+      },
+    };
+
+    console.log("📊 Métricas ONA:", {
+      ...metrics,
+      degreeCentrality: calculatedNetworkMetrics.degreeCentrality,
+      betweenness: calculatedNetworkMetrics.betweenness,
+      betweennessLeaders: calculatedNetworkMetrics.betweennessLeaders,
     });
-  }, [calculatedNetworkMetrics, participants?.length, responses?.length]);
+  }, [calculatedNetworkMetrics, onaMetrics, participants, responses]);
 
   const graphLinks = Array.isArray(onaMetrics?.links) ? onaMetrics.links : [];
   const indegreeMap = onaMetrics?.indegree ?? {};
@@ -1303,7 +1393,7 @@ export default function ResultadosPage() {
       nodes: onaMetrics?.nodes ?? [],
       links: onaMetrics?.links ?? [],
     });
-  }, [onaMetrics, participants?.length, responses?.length]);
+  }, [onaMetrics, participants, responses]);
 
   const onaGraphData = useMemo(
     () => ({
@@ -1588,6 +1678,15 @@ export default function ResultadosPage() {
     setError(null);
     setAiReportOpen(true);
 
+    const metricsPayload = toAiDiagnosisMetricsPayload(
+      calculatedNetworkMetrics,
+      {
+        groupId,
+        teamName: groupName ?? `Equipo ${groupId}`,
+        rosterSize: participants?.length ?? 0,
+      },
+    );
+
     try {
       let response: globalThis.Response;
       try {
@@ -1595,49 +1694,13 @@ export default function ResultadosPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           cache: "no-store",
-          body: JSON.stringify({
-            teamName: groupName ?? `Equipo ${groupId}`,
-            density: calculatedNetworkMetrics.density,
-            reciprocityRate: calculatedNetworkMetrics.reciprocityRate,
-            isolatedParticipants:
-              calculatedNetworkMetrics.isolatedParticipants.map(
-                (participant) => ({
-                  id: participant.id,
-                  name: participant.name,
-                }),
-              ),
-            topInfluencers: calculatedNetworkMetrics.topInfluencers.map(
-              (influencer) => ({
-                id: influencer.id,
-                name: influencer.name,
-                inDegree: influencer.inDegree,
-              }),
-            ),
-            rosterSize: participants?.length ?? 0,
-            // Contexto legacy opcional (compatibilidad del endpoint).
-            leaders: calculatedNetworkMetrics.topInfluencers.map(
-              (influencer) => ({
-                id: influencer.id,
-                name: influencer.name,
-                nominationsReceived: influencer.inDegree,
-                votes: influencer.inDegree,
-              }),
-            ),
-            fragmentation: {
-              index: Math.min(
-                1,
-                (calculatedNetworkMetrics.isolatedParticipants.length || 0) /
-                  Math.max(participants?.length ?? 1, 1),
-              ),
-              siloCount: networkSilos?.length ?? 0,
-            },
-          }),
+          body: JSON.stringify(metricsPayload),
         });
       } catch (networkError) {
         throw new Error(
           networkError instanceof Error
-            ? `No se pudo contactar con ai-diagnosis: ${networkError.message}`
-            : "No se pudo contactar con ai-diagnosis.",
+            ? `No se pudo contactar con el servicio de diagnóstico: ${networkError.message}`
+            : "No se pudo contactar con el servicio de diagnóstico.",
         );
       }
 
@@ -1645,6 +1708,10 @@ export default function ResultadosPage() {
         success?: boolean;
         error?: string;
         diagnosis?: string;
+        analysis?: {
+          diagnosis?: string;
+          summary?: string;
+        };
         usedFallback?: boolean;
         model?: string | null;
       };
@@ -1653,52 +1720,83 @@ export default function ResultadosPage() {
         data = (await response.json()) as typeof data;
       } catch {
         throw new Error(
-          `ai-diagnosis devolvió una respuesta no válida (HTTP ${response.status}).`,
+          "El servicio de diagnóstico devolvió una respuesta no válida.",
         );
       }
 
       if (!response.ok || !data.success) {
         throw new Error(
           data.error ??
-            `No se pudo generar el diagnóstico IA del equipo (HTTP ${response.status}).`,
+            "No se pudo generar el diagnóstico ejecutivo en este momento.",
         );
       }
 
       const diagnosisText =
-        typeof data.diagnosis === "string" && data.diagnosis.trim().length > 0
+        (typeof data.diagnosis === "string" && data.diagnosis.trim().length > 0
           ? data.diagnosis.trim()
-          : null;
+          : null) ??
+        (typeof data.analysis?.diagnosis === "string" &&
+        data.analysis.diagnosis.trim().length > 0
+          ? data.analysis.diagnosis.trim()
+          : null);
 
       if (!diagnosisText) {
-        throw new Error(
-          "El endpoint de diagnóstico IA devolvió una respuesta vacía.",
-        );
+        throw new Error("El diagnóstico IA llegó vacío.");
       }
 
+      // Liberar loading en cuanto llega la respuesta válida.
+      setIsLoadingAi(false);
       setAiReport(diagnosisText);
       setAiUsedFallback(Boolean(data.usedFallback));
       setAiReportOpen(true);
 
       console.log("[ai-diagnosis] Informe generado:", {
+        groupId,
         model: data.model,
         usedFallback: data.usedFallback ?? false,
         chars: diagnosisText.length,
-        metrics: {
-          density: calculatedNetworkMetrics.density,
-          reciprocityRate: calculatedNetworkMetrics.reciprocityRate,
-          isolated: calculatedNetworkMetrics.isolatedParticipants.length,
-          topInfluencers: calculatedNetworkMetrics.topInfluencers.length,
-        },
+        payloadKeys: Object.keys(metricsPayload),
       });
     } catch (err) {
       console.error("[resultados] Error en handleGenerateAiDiagnosis:", err);
-      setAiReport(null);
-      setAiUsedFallback(false);
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Error al generar el diagnóstico IA.",
+      setIsLoadingAi(false);
+
+      // No tumbar la UI: informe de prueba estructurado + aviso amigable.
+      const fallbackMarkdown = buildFallbackTeamDiagnosisMarkdown({
+        teamName: metricsPayload.teamName,
+        density: {
+          nodeCount: metricsPayload.rosterSize,
+          linkCount: 0,
+          maxPossibleLinks:
+            metricsPayload.rosterSize > 1
+              ? metricsPayload.rosterSize * (metricsPayload.rosterSize - 1)
+              : 0,
+          density: metricsPayload.density / 100,
+          densityPercent: metricsPayload.density,
+        },
+        reciprocityRate: metricsPayload.reciprocityRate,
+        isolatedParticipants: metricsPayload.isolatedParticipants,
+        topInfluencers: metricsPayload.topInfluencers,
+        leaders: metricsPayload.topInfluencers.map((influencer) => ({
+          id: influencer.id,
+          name: influencer.name,
+          nominationsReceived: influencer.inDegree,
+        })),
+        fragmentation: {
+          index: Math.min(
+            1,
+            metricsPayload.isolatedParticipants.length /
+              Math.max(metricsPayload.rosterSize, 1),
+          ),
+        },
+      });
+
+      setAiReport(
+        `${fallbackMarkdown}\n\n> *No pudimos completar la llamada a IA (${err instanceof Error ? err.message : "error desconocido"}). Se muestra un informe de prueba para no interrumpir tu análisis.*`,
       );
+      setAiUsedFallback(true);
+      setAiReportOpen(true);
+      setError(null);
     } finally {
       setIsLoadingAi(false);
     }
@@ -1817,15 +1915,15 @@ export default function ResultadosPage() {
                       isLoadingAi ||
                       (!demoModeEnabled && participants.length === 0)
                     }
-                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-violet-500 active:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-slate-900 to-slate-800 px-5 py-2.5 text-sm font-semibold text-white shadow-[0_8px_24px_rgba(15,23,42,0.25)] ring-1 ring-slate-900/10 transition-all hover:from-slate-800 hover:to-slate-700 hover:shadow-[0_10px_28px_rgba(15,23,42,0.3)] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isLoadingAi ? (
                       <>
                         <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                        Analizando dinámicas de red con IA...
+                        Generando diagnóstico ejecutivo…
                       </>
                     ) : (
-                      "✨ Generar Diagnóstico con IA"
+                      "✨ Generar Diagnóstico Ejecutivo de IA"
                     )}
                   </button>
                   {!demoModeEnabled && (
@@ -2058,33 +2156,36 @@ export default function ResultadosPage() {
         <EdtExecutiveDashboard metrics={displayedEdtMetrics} />
 
         {isLoadingAi || aiReport ? (
-          <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_12px_40px_rgba(15,23,42,0.06)]">
             <button
               type="button"
               onClick={() => setAiReportOpen((open) => !open)}
-              className="flex w-full items-center justify-between gap-4 border-b border-slate-200 bg-slate-50 px-6 py-4 text-left transition-colors hover:bg-slate-100"
+              className="flex w-full items-center justify-between gap-4 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white px-6 py-5 text-left transition-colors hover:from-slate-100 hover:to-slate-50"
               aria-expanded={aiReportOpen}
             >
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-lg font-semibold text-slate-900">
-                    Informe Ejecutivo de Clima y Red
-                  </h2>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    People Analytics · HR
+                  </p>
                   {isLoadingAi ? (
-                    <span className="inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-0.5 text-xs font-medium text-violet-700">
-                      <span className="h-3 w-3 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
+                    <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-xs font-medium text-slate-700">
+                      <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-slate-700" />
                       Generando…
                     </span>
                   ) : null}
                   {aiUsedFallback && !isLoadingAi ? (
                     <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800">
-                      Modo prueba (sin OpenAI)
+                      Informe de prueba / sin API Key
                     </span>
                   ) : null}
                 </div>
+                  <h2 className="mt-1 text-lg font-semibold tracking-tight text-slate-900">
+                    Informe Ejecutivo de Clima laboral y Red
+                  </h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  Diagnóstico corporativo a partir de densidad, reciprocidad,
-                  aislados e influencers del motor ONA.
+                  Lectura corporativa de cohesión, reciprocidad, aislamiento e
+                  influencia informal a partir del motor ONA.
                 </p>
               </div>
               <span className="shrink-0 text-sm font-medium text-slate-500">
@@ -2093,12 +2194,12 @@ export default function ResultadosPage() {
             </button>
 
             {aiReportOpen ? (
-              <div className="p-6">
+              <div className="min-w-0 overflow-hidden p-6">
                 {isLoadingAi ? (
                   <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-6">
                     <div className="flex items-center gap-3 text-sm font-medium text-slate-700">
-                      <span className="h-5 w-5 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
-                      Analizando dinámicas de red con IA...
+                      <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-slate-800" />
+                      La IA está redactando el diagnóstico ejecutivo…
                     </div>
                     <div className="space-y-3" aria-hidden="true">
                       <div className="h-4 w-2/5 animate-pulse rounded bg-slate-200" />
@@ -2108,13 +2209,18 @@ export default function ResultadosPage() {
                       <div className="mt-4 h-4 w-1/3 animate-pulse rounded bg-slate-200" />
                       <div className="h-3 w-full animate-pulse rounded bg-slate-200" />
                       <div className="h-3 w-10/12 animate-pulse rounded bg-slate-200" />
+                      <div className="mt-4 h-4 w-2/5 animate-pulse rounded bg-slate-200" />
+                      <div className="h-3 w-full animate-pulse rounded bg-slate-200" />
                     </div>
                   </div>
                 ) : aiReport ? (
-                  <article className="rounded-xl border border-slate-200 bg-white p-5">
-                    <div className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
-                      {aiReport}
-                    </div>
+                  <article className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+                    <div
+                      className="executive-ai-report w-full min-w-0 max-w-full overflow-hidden break-words [overflow-wrap:anywhere] [&_*]:max-w-full [&_*]:break-words"
+                      dangerouslySetInnerHTML={{
+                        __html: renderExecutiveMarkdown(aiReport),
+                      }}
+                    />
                   </article>
                 ) : null}
               </div>

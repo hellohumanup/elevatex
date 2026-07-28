@@ -9,7 +9,9 @@ import {
   type TeamIsolatedParticipant,
   type TeamTopInfluencer,
 } from "@/lib/services/aiDiagnosis";
-import type { NetworkDensity } from "@/lib/mathEngine";
+import type {
+  NetworkDensity,
+} from "@/lib/mathEngine";
 
 export const dynamic = "force-dynamic";
 
@@ -17,12 +19,28 @@ const OPENAI_MODEL = "gpt-4o-mini";
 const USER_PROMPT =
   "Redacta el diagnóstico ejecutivo de este equipo en Markdown, con tono de Consultor Senior de HR.";
 
+/** Análisis estructurado que consume la vista de resultados. */
+type AiDiagnosisAnalysis = {
+  diagnosis: string;
+  summary: string;
+  metrics: {
+    density: number;
+    reciprocityRate: number;
+    rosterSize: number;
+    isolatedCount: number;
+    topInfluencerCount: number;
+    betweennessLeaderCount: number;
+  };
+};
+
 type AiDiagnosisSuccessResponse = {
   success: true;
   diagnosis: string;
+  analysis: AiDiagnosisAnalysis;
   systemPrompt: string;
   usedFallback: boolean;
   model: string | null;
+  groupId?: string;
 };
 
 type AiDiagnosisErrorResponse = {
@@ -200,13 +218,68 @@ function parseTopInfluencers(value: unknown): TeamTopInfluencer[] | undefined {
 }
 
 /**
- * Acepta el payload nuevo del motor matemático y el contrato legacy
+ * Valida campos básicos del payload tipado `toAiDiagnosisMetricsPayload`.
+ * No exige betweenness/degreeCentrality (pueden venir vacíos en redes pequeñas).
+ */
+function validateAiDiagnosisMetricsPayload(
+  body: Record<string, unknown>,
+): { ok: true } | { ok: false; error: string } {
+  if (body.density === undefined || body.density === null) {
+    return { ok: false, error: "Falta `density` (número 0–100)." };
+  }
+
+  if (
+    typeof body.density !== "number" &&
+    !isRecord(body.density) &&
+    Number.isNaN(Number(body.density))
+  ) {
+    return { ok: false, error: "`density` debe ser un número o un objeto NetworkDensity." };
+  }
+
+  if (
+    body.reciprocityRate !== undefined &&
+    !Number.isFinite(Number(body.reciprocityRate))
+  ) {
+    return { ok: false, error: "`reciprocityRate` debe ser un número finito." };
+  }
+
+  if (
+    body.isolatedParticipants !== undefined &&
+    !Array.isArray(body.isolatedParticipants)
+  ) {
+    return { ok: false, error: "`isolatedParticipants` debe ser un array." };
+  }
+
+  if (
+    body.topInfluencers !== undefined &&
+    !Array.isArray(body.topInfluencers)
+  ) {
+    return { ok: false, error: "`topInfluencers` debe ser un array." };
+  }
+
+  if (
+    body.rosterSize !== undefined &&
+    !Number.isFinite(Number(body.rosterSize))
+  ) {
+    return { ok: false, error: "`rosterSize` debe ser un número finito." };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Acepta el payload de `toAiDiagnosisMetricsPayload` y el contrato legacy
  * `{ density, leaders, fragmentation }`.
  */
 function parseAiDiagnosisRequestBody(
   body: unknown,
 ): TeamDiagnosisPromptInput | null {
   if (!isRecord(body)) {
+    return null;
+  }
+
+  const validation = validateAiDiagnosisMetricsPayload(body);
+  if (!validation.ok) {
     return null;
   }
 
@@ -282,6 +355,43 @@ function parseAiDiagnosisRequestBody(
   };
 }
 
+function buildAnalysisEnvelope(
+  diagnosis: string,
+  payload: TeamDiagnosisPromptInput,
+  body: Record<string, unknown>,
+): AiDiagnosisAnalysis {
+  const densityPercent = payload.density.densityPercent;
+  const reciprocityRate = payload.reciprocityRate ?? 0;
+  const rosterSize = Number(
+    body.rosterSize ?? payload.density.nodeCount ?? 0,
+  );
+  const isolatedCount = payload.isolatedParticipants?.length ?? 0;
+  const topInfluencerCount = payload.topInfluencers?.length ?? 0;
+  const betweennessLeaderCount = Array.isArray(body.betweennessLeaders)
+    ? body.betweennessLeaders.length
+    : 0;
+
+  const summary = [
+    `Densidad ${densityPercent.toFixed(1)}%`,
+    `reciprocidad ${reciprocityRate.toFixed(1)}%`,
+    `${isolatedCount} aislado(s)`,
+    `${topInfluencerCount} influencer(s)`,
+  ].join(" · ");
+
+  return {
+    diagnosis,
+    summary,
+    metrics: {
+      density: densityPercent,
+      reciprocityRate,
+      rosterSize: Number.isFinite(rosterSize) ? Math.max(0, Math.floor(rosterSize)) : 0,
+      isolatedCount,
+      topInfluencerCount,
+      betweennessLeaderCount,
+    },
+  };
+}
+
 async function generateDiagnosisWithOpenAI(systemPrompt: string): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
 
@@ -347,6 +457,28 @@ export async function POST(request: Request) {
     );
   }
 
+  if (!isRecord(body)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error:
+          "Cuerpo inválido. Se espera el payload de toAiDiagnosisMetricsPayload (density, reciprocityRate, …).",
+      } satisfies AiDiagnosisErrorResponse,
+      { status: 400 },
+    );
+  }
+
+  const basicValidation = validateAiDiagnosisMetricsPayload(body);
+  if (!basicValidation.ok) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: basicValidation.error,
+      } satisfies AiDiagnosisErrorResponse,
+      { status: 400 },
+    );
+  }
+
   const payload = parseAiDiagnosisRequestBody(body);
 
   if (!payload) {
@@ -354,68 +486,83 @@ export async function POST(request: Request) {
       {
         success: false,
         error:
-          "Cuerpo inválido. Se requiere { density, reciprocityRate?, isolatedParticipants?, topInfluencers?, teamName? } (o el contrato legacy density/leaders/fragmentation).",
+          "Cuerpo inválido. Se requiere AiDiagnosisMetricsPayload: { density, reciprocityRate, isolatedParticipants, topInfluencers, rosterSize, … }.",
       } satisfies AiDiagnosisErrorResponse,
       { status: 400 },
     );
   }
 
+  const requestGroupId =
+    typeof body.groupId === "string" ? body.groupId.trim() : undefined;
+
   try {
     const systemPrompt = await generateTeamDiagnosisPrompt(payload);
     const hasOpenAiKey = Boolean(process.env.OPENAI_API_KEY?.trim());
 
-    // Sin clave: fallback estructurado para no romper la UI en tests/local.
+    // Sin clave: mock/fallback estructurado para no romper la UI en tests/local.
     if (!hasOpenAiKey) {
       const diagnosis = buildFallbackTeamDiagnosisMarkdown(payload);
+      const analysis = buildAnalysisEnvelope(diagnosis, payload, body);
 
       console.warn(
-        "[api/ai-diagnosis] OPENAI_API_KEY ausente — devolviendo informe fallback.",
+        "[api/ai-diagnosis] OPENAI_API_KEY ausente — devolviendo informe de prueba.",
+        { groupId: requestGroupId },
       );
 
       return NextResponse.json({
         success: true,
         diagnosis,
+        analysis,
         systemPrompt,
         usedFallback: true,
         model: null,
+        ...(requestGroupId ? { groupId: requestGroupId } : {}),
       } satisfies AiDiagnosisSuccessResponse);
     }
 
-    const diagnosis = await generateDiagnosisWithOpenAI(systemPrompt);
-
-    return NextResponse.json({
-      success: true,
-      diagnosis,
-      systemPrompt,
-      usedFallback: false,
-      model: OPENAI_MODEL,
-    } satisfies AiDiagnosisSuccessResponse);
-  } catch (error) {
-    console.error("[api/ai-diagnosis]", error);
-
-    // Si OpenAI falla, aún así intentar no tumbar la UI con un fallback.
     try {
-      const systemPrompt = await generateTeamDiagnosisPrompt(payload);
-      const diagnosis = buildFallbackTeamDiagnosisMarkdown(payload);
+      const diagnosis = await generateDiagnosisWithOpenAI(systemPrompt);
+      const analysis = buildAnalysisEnvelope(diagnosis, payload, body);
 
       return NextResponse.json({
         success: true,
-        diagnosis: `${diagnosis}\n\n> *Nota: se usó fallback tras error de OpenAI (${resolveOpenAiErrorMessage(error)}).*`,
+        diagnosis,
+        analysis,
+        systemPrompt,
+        usedFallback: false,
+        model: OPENAI_MODEL,
+        ...(requestGroupId ? { groupId: requestGroupId } : {}),
+      } satisfies AiDiagnosisSuccessResponse);
+    } catch (openAiError) {
+      console.error("[api/ai-diagnosis] OpenAI error:", openAiError, {
+        groupId: requestGroupId,
+      });
+
+      const diagnosis = `${buildFallbackTeamDiagnosisMarkdown(payload)}\n\n> *Nota: se usó informe de prueba tras error de OpenAI (${resolveOpenAiErrorMessage(openAiError)}).*`;
+      const analysis = buildAnalysisEnvelope(diagnosis, payload, body);
+
+      return NextResponse.json({
+        success: true,
+        diagnosis,
+        analysis,
         systemPrompt,
         usedFallback: true,
         model: null,
+        ...(requestGroupId ? { groupId: requestGroupId } : {}),
       } satisfies AiDiagnosisSuccessResponse);
-    } catch {
-      const status =
-        error instanceof OpenAI.APIError && error.status === 429 ? 429 : 500;
-
-      return NextResponse.json(
-        {
-          success: false,
-          error: resolveOpenAiErrorMessage(error),
-        } satisfies AiDiagnosisErrorResponse,
-        { status },
-      );
     }
+  } catch (error) {
+    console.error("[api/ai-diagnosis]", error, { groupId: requestGroupId });
+
+    const status =
+      error instanceof OpenAI.APIError && error.status === 429 ? 429 : 500;
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: resolveOpenAiErrorMessage(error),
+      } satisfies AiDiagnosisErrorResponse,
+      { status },
+    );
   }
 }

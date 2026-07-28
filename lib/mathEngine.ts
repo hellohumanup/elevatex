@@ -1086,8 +1086,9 @@ export type NetworkMetricsInfluencer = {
 };
 
 /**
- * Resultado agregado de densidad, grados, reciprocidad e influencers.
+ * Resultado agregado de densidad, grados, reciprocidad, intermediación e influencers.
  * Densidad y reciprocidad se expresan en porcentaje 0–100.
+ * Listo para KPIs ejecutivos y payload de `/api/ai-diagnosis`.
  */
 export type CalculatedNetworkMetrics = {
   /** L / (N × (N − 1)) × 100 — arcos dirigidos únicos sobre el máximo posible. */
@@ -1097,19 +1098,136 @@ export type CalculatedNetworkMetrics = {
   /** Votos emitidos por colaborador (id → conteo). */
   outDegree: NetworkDegreeMap;
   /**
+   * Centralidad de grado normalizada 0–1:
+   * in = inDegree / (N−1), out = outDegree / (N−1).
+   */
+  degreeCentrality: {
+    in: NetworkDegreeMap;
+    out: NetworkDegreeMap;
+  };
+  /**
    * Pares mutuos {A,B} / C(N, 2) × 100 —
    * reciprocidad sobre el máximo de conexiones bidireccionales posibles.
    */
   reciprocityRate: number;
+  /**
+   * Intermediación (betweenness) normalizada 0–1 por nodo
+   * (algoritmo de Brandes sobre el digrafo de nominaciones únicas).
+   */
+  betweenness: NetworkDegreeMap;
+  /** Top 3 por betweenness (desempate alfabético). */
+  betweennessLeaders: Array<{
+    id: string;
+    name: string;
+    betweenness: number;
+  }>;
   /** Colaboradores con 0 votos recibidos. */
   isolatedParticipants: Array<{ id: string; name: string }>;
   /** Top 3 por inDegree (desempate alfabético). */
   topInfluencers: NetworkMetricsInfluencer[];
 };
 
+/** Alias semántico para informe ejecutivo / diagnóstico IA. */
+export type OnaExecutiveMetrics = CalculatedNetworkMetrics;
+
 /**
- * Calcula métricas ONA puras a partir del roster y respuestas planas.
+ * Betweenness centrality (Brandes) sobre digrafo simple de nominaciones.
+ * Puntuación cruda; el caller normaliza por (N−1)(N−2) cuando N > 2.
+ */
+export function calculateBetweennessCentrality(
+  nodeIds: readonly string[],
+  directedEdges: ReadonlySet<string>,
+): Record<string, number> {
+  const nodes = [...new Set(nodeIds.map((id) => String(id).trim()).filter(Boolean))];
+  const betweenness: Record<string, number> = {};
+  const adjacency = new Map<string, string[]>();
+
+  for (const id of nodes) {
+    betweenness[id] = 0;
+    adjacency.set(id, []);
+  }
+
+  for (const edge of directedEdges) {
+    const separator = edge.indexOf("\u2192");
+    if (separator <= 0) {
+      continue;
+    }
+    const source = edge.slice(0, separator);
+    const target = edge.slice(separator + 1);
+    if (!adjacency.has(source) || !adjacency.has(target) || source === target) {
+      continue;
+    }
+    adjacency.get(source)!.push(target);
+  }
+
+  for (const source of nodes) {
+    const stack: string[] = [];
+    const predecessors = new Map<string, string[]>();
+    const sigma: Record<string, number> = {};
+    const distance: Record<string, number> = {};
+    const queue: string[] = [];
+
+    for (const node of nodes) {
+      predecessors.set(node, []);
+      sigma[node] = 0;
+      distance[node] = -1;
+    }
+
+    sigma[source] = 1;
+    distance[source] = 0;
+    queue.push(source);
+
+    while (queue.length > 0) {
+      const vertex = queue.shift()!;
+      stack.push(vertex);
+
+      for (const neighbor of adjacency.get(vertex) ?? []) {
+        if (distance[neighbor]! < 0) {
+          distance[neighbor] = distance[vertex]! + 1;
+          queue.push(neighbor);
+        }
+
+        if (distance[neighbor] === distance[vertex]! + 1) {
+          sigma[neighbor] = (sigma[neighbor] ?? 0) + (sigma[vertex] ?? 0);
+          predecessors.get(neighbor)!.push(vertex);
+        }
+      }
+    }
+
+    const delta: Record<string, number> = {};
+    for (const node of nodes) {
+      delta[node] = 0;
+    }
+
+    while (stack.length > 0) {
+      const w = stack.pop()!;
+      for (const v of predecessors.get(w) ?? []) {
+        const sigmaW = sigma[w] ?? 0;
+        if (sigmaW <= 0) {
+          continue;
+        }
+        delta[v] =
+          (delta[v] ?? 0) +
+          ((sigma[v] ?? 0) / sigmaW) * (1 + (delta[w] ?? 0));
+      }
+      if (w !== source) {
+        betweenness[w] = (betweenness[w] ?? 0) + (delta[w] ?? 0);
+      }
+    }
+  }
+
+  return betweenness;
+}
+
+/**
+ * Calcula métricas ONA puras a partir del roster y respuestas (planas o JSONB).
  * No toca Supabase ni UI: solo aritmética de red dirigida.
+ *
+ * Fórmulas:
+ * - Densidad % = |E| / (N(N−1)) × 100
+ * - Reciprocidad % = pares mutuos / C(N,2) × 100
+ * - Centralidad de grado = degree / (N−1)
+ * - Betweenness = Brandes / ((N−1)(N−2))
  */
 export function calculateNetworkMetrics(
   participants: readonly NetworkMetricsParticipantInput[],
@@ -1191,6 +1309,47 @@ export function calculateNetworkMetrics(
       ? Math.round((mutualPairCount / maxBidirectionalPairs) * 10000) / 100
       : 0;
 
+  // Centralidad de grado normalizada (Freeman): degree / (N−1).
+  const degreeDenominator = n > 1 ? n - 1 : 1;
+  const degreeCentralityIn: Record<string, number> = {};
+  const degreeCentralityOut: Record<string, number> = {};
+  for (const participant of roster) {
+    degreeCentralityIn[participant.id] =
+      Math.round(
+        ((inDegree[participant.id] ?? 0) / degreeDenominator) * 10000,
+      ) / 10000;
+    degreeCentralityOut[participant.id] =
+      Math.round(
+        ((outDegree[participant.id] ?? 0) / degreeDenominator) * 10000,
+      ) / 10000;
+  }
+
+  // Intermediación (Brandes) normalizada para digrafos: / ((N−1)(N−2)).
+  const rawBetweenness = calculateBetweennessCentrality(
+    roster.map((participant) => participant.id),
+    directedEdges,
+  );
+  const betweennessNorm =
+    n > 2 ? (n - 1) * (n - 2) : 1;
+  const betweenness: Record<string, number> = {};
+  for (const participant of roster) {
+    const raw = rawBetweenness[participant.id] ?? 0;
+    betweenness[participant.id] =
+      Math.round((raw / betweennessNorm) * 10000) / 10000;
+  }
+
+  const betweennessLeaders = [...roster]
+    .map((participant) => ({
+      id: participant.id,
+      name: participant.name,
+      betweenness: betweenness[participant.id] ?? 0,
+    }))
+    .sort(
+      (a, b) =>
+        b.betweenness - a.betweenness || a.name.localeCompare(b.name, "es"),
+    )
+    .slice(0, 3);
+
   // Aislados: inDegree === 0.
   const isolatedParticipants = roster
     .filter((participant) => (inDegree[participant.id] ?? 0) === 0)
@@ -1200,7 +1359,7 @@ export function calculateNetworkMetrics(
     }))
     .sort((a, b) => a.name.localeCompare(b.name, "es"));
 
-  // Top 3 influencers por votos recibidos.
+  // Top 3 influencers por votos recibidos (centralidad de entrada).
   const topInfluencers = [...roster]
     .map((participant) => ({
       id: participant.id,
@@ -1217,8 +1376,52 @@ export function calculateNetworkMetrics(
     density,
     inDegree,
     outDegree,
+    degreeCentrality: {
+      in: degreeCentralityIn,
+      out: degreeCentralityOut,
+    },
     reciprocityRate,
+    betweenness,
+    betweennessLeaders,
     isolatedParticipants,
     topInfluencers,
+  };
+}
+
+/**
+ * Proyecta el objeto ONA a un payload plano para `/api/ai-diagnosis`
+ * y el informe ejecutivo (sin romper contratos legacy).
+ */
+export type AiDiagnosisMetricsPayload = {
+  groupId?: string;
+  teamName?: string;
+  density: number;
+  reciprocityRate: number;
+  isolatedParticipants: Array<{ id: string; name: string }>;
+  topInfluencers: NetworkMetricsInfluencer[];
+  betweennessLeaders: CalculatedNetworkMetrics["betweennessLeaders"];
+  degreeCentrality: CalculatedNetworkMetrics["degreeCentrality"];
+  rosterSize: number;
+};
+
+export function toAiDiagnosisMetricsPayload(
+  metrics: CalculatedNetworkMetrics,
+  options?: {
+    teamName?: string;
+    groupId?: string;
+    rosterSize?: number;
+  },
+): AiDiagnosisMetricsPayload {
+  return {
+    ...(options?.groupId ? { groupId: options.groupId } : {}),
+    ...(options?.teamName ? { teamName: options.teamName } : {}),
+    density: metrics.density,
+    reciprocityRate: metrics.reciprocityRate,
+    isolatedParticipants: metrics.isolatedParticipants,
+    topInfluencers: metrics.topInfluencers,
+    betweennessLeaders: metrics.betweennessLeaders,
+    degreeCentrality: metrics.degreeCentrality,
+    rosterSize:
+      options?.rosterSize ?? Object.keys(metrics.inDegree).length,
   };
 }

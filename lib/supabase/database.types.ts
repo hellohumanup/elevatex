@@ -1,6 +1,10 @@
 /**
- * Tipos canónicos del esquema multi-tenant V2 (organizations + managers + groups).
- * Usados por el cliente Supabase tipado para inserts/selects sin `as any`.
+ * Tipos canónicos del esquema multi-tenant
+ * (organizations + managers + groups).
+ *
+ * Fuente de verdad para el cliente Supabase tipado.
+ * Compatibilidad: campos opcionales (`user_id`, `name`, `email`, `tenant_id`)
+ * preservan selects/inserts del flujo actual sin romper builds.
  */
 export type Json =
   | string
@@ -10,51 +14,67 @@ export type Json =
   | { [key: string]: Json | undefined }
   | Json[];
 
+/** Rol HR dentro de una organización. */
+export type ManagerRole = "admin" | "manager";
+
 /** Cliente B2B — raíz del tenant. */
 export type OrganizationRow = {
   id: string;
   name: string;
+  /** Identificador URL-friendly único (nullable en filas legacy). */
+  slug: string | null;
   created_at: string;
 };
 
 export type OrganizationInsert = {
   id?: string;
   name: string;
+  slug?: string | null;
   created_at?: string;
 };
 
 export type OrganizationUpdate = {
   id?: string;
   name?: string;
+  slug?: string | null;
   created_at?: string;
 };
 
 /**
- * Manager HR vinculado a Auth (`user_id`) y a una organización.
- * `id` es la identidad de negocio; no confundir con `auth.users.id`.
+ * Manager / perfil HR.
+ * Modelo canónico: `id` → `auth.users.id`, con `role` y `full_name`.
+ * Campos opcionales (`user_id`, `name`, `email`) mantienen el flujo actual.
  */
 export type ManagerRow = {
   id: string;
-  user_id: string;
   organization_id: string;
-  name: string;
-  email: string;
+  role: ManagerRole | string;
+  full_name: string;
+  /** Compat: suele coincidir con `id` cuando el PK es auth.users.id. */
+  user_id?: string | null;
+  /** Compat: alias histórico de `full_name`. */
+  name?: string | null;
+  email?: string | null;
 };
 
 export type ManagerInsert = {
-  id?: string;
-  user_id: string;
+  id: string;
   organization_id: string;
-  name: string;
-  email: string;
+  role?: ManagerRole | string;
+  full_name: string;
+  user_id?: string | null;
+  name?: string | null;
+  email?: string | null;
 };
 
 export type ManagerUpdate = {
   id?: string;
-  user_id?: string;
   organization_id?: string;
-  name?: string;
-  email?: string;
+  role?: ManagerRole | string;
+  full_name?: string;
+  user_id?: string | null;
+  name?: string | null;
+  email?: string | null;
 };
 
 /**
@@ -141,7 +161,12 @@ export type Database = {
       };
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      current_user_organization_id: {
+        Args: Record<string, never>;
+        Returns: string | null;
+      };
+    };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
   };

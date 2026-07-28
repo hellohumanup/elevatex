@@ -31,7 +31,7 @@ const TENANT_FORBIDDEN_MESSAGE =
 
 const DEFAULT_FROM =
   process.env.RESEND_FROM_EMAIL?.trim() ||
-  "ElevateX <invitaciones@human-up.eu>";
+  "Vínculo <onboarding@resend.dev>";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 
@@ -505,7 +505,7 @@ export async function POST(_request: Request, context: RouteContext) {
           magicUrl,
         });
       } else {
-        const { error: sendError } = await resend!.emails.send({
+        const { data, error: sendError } = await resend!.emails.send({
           from: DEFAULT_FROM,
           to: email,
           subject,
@@ -513,15 +513,18 @@ export async function POST(_request: Request, context: RouteContext) {
         });
 
         if (sendError) {
-          failed += 1;
-          results.push({
-            participantId: String(participant.id),
-            email,
-            status: "failed",
-            error: sendError.message,
-            magicUrl,
-          });
-          continue;
+          console.error("❌ [Resend Error]:", sendError);
+          return NextResponse.json(
+            {
+              success: false,
+              error: sendError.message,
+            },
+            { status: 400 },
+          );
+        }
+
+        if (data) {
+          console.log("✅ [Resend Success]:", data);
         }
 
         sent += 1;
