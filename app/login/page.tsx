@@ -14,13 +14,23 @@ export default function LoginPage() {
   const supabase = useMemo(() => createClientComponentClient(), []);
 
   const [mode, setMode] = useState<AuthMode>("login");
+  const [fullName, setFullName] = useState("");
+  const [companyName, setCompanyName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
+  function switchMode(nextMode: AuthMode) {
+    setMode(nextMode);
+    setError(null);
+    setInfo(null);
+    setIsSubmitting(false);
+  }
+
   async function redirectToDashboard() {
+    setInfo("Acceso correcto. Redirigiendo al panel…");
     router.refresh();
     router.replace("/dashboard");
   }
@@ -29,10 +39,29 @@ export default function LoginPage() {
     event.preventDefault();
 
     const normalizedEmail = email.trim().toLowerCase();
+    const normalizedFullName = fullName.trim();
+    const normalizedCompanyName = companyName.trim();
 
     if (!normalizedEmail || !password) {
       setError("Introduce tu email y contraseña.");
       return;
+    }
+
+    if (mode === "register") {
+      if (!normalizedFullName) {
+        setError("Introduce tu nombre completo.");
+        return;
+      }
+
+      if (!normalizedCompanyName) {
+        setError("Introduce el nombre de tu empresa u organización.");
+        return;
+      }
+
+      if (password.length < 6) {
+        setError("La contraseña debe tener al menos 6 caracteres.");
+        return;
+      }
     }
 
     setIsSubmitting(true);
@@ -64,6 +93,13 @@ export default function LoginPage() {
       const { data, error: signUpError } = await supabase.auth.signUp({
         email: normalizedEmail,
         password,
+        options: {
+          data: {
+            full_name: normalizedFullName,
+            company_name: normalizedCompanyName,
+            organization_name: normalizedCompanyName,
+          },
+        },
       });
 
       if (signUpError) {
@@ -71,17 +107,32 @@ export default function LoginPage() {
         return;
       }
 
-      // Si Supabase crea sesión al registrar (confirmación de email desactivada).
+      // Supabase a veces devuelve user sin identities cuando el email ya existe.
+      const alreadyRegistered =
+        Array.isArray(data.user?.identities) && data.user.identities.length === 0;
+
+      if (alreadyRegistered) {
+        setError(
+          translateAuthError(
+            "User already registered. Please sign in instead.",
+          ),
+        );
+        setMode("login");
+        return;
+      }
+
+      // Sesión inmediata (confirmación de email desactivada).
       if (data.session?.user) {
         await redirectToDashboard();
         return;
       }
 
-      // Cuenta creada pero falta confirmar email → no hay sesión aún.
+      // Cuenta creada: hace falta confirmar email antes de entrar.
       setInfo(
         "Cuenta creada. Revisa tu email para confirmarla e inicia sesión.",
       );
       setMode("login");
+      setPassword("");
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
@@ -106,7 +157,7 @@ export default function LoginPage() {
         {error ? (
           <p
             role="alert"
-            className="mt-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+            className="mt-6 rounded-lg border border-red-200/80 bg-red-50/80 px-4 py-3 text-sm text-red-700 backdrop-blur-sm"
           >
             {error}
           </p>
@@ -115,13 +166,57 @@ export default function LoginPage() {
         {info ? (
           <p
             role="status"
-            className="mt-6 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700"
+            className="mt-6 rounded-lg border border-slate-200/80 bg-slate-50/80 px-4 py-3 text-sm text-slate-700 backdrop-blur-sm"
           >
             {info}
           </p>
         ) : null}
 
         <form onSubmit={handleAuth} className="mt-6 space-y-4">
+          {mode === "register" ? (
+            <>
+              <div>
+                <label
+                  htmlFor="fullName"
+                  className="mb-1 block text-sm font-medium text-slate-700"
+                >
+                  Nombre completo
+                </label>
+                <input
+                  id="fullName"
+                  type="text"
+                  autoComplete="name"
+                  required
+                  value={fullName}
+                  onChange={(event) => setFullName(event.target.value)}
+                  disabled={isSubmitting}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-60"
+                  placeholder="Ana García"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="companyName"
+                  className="mb-1 block text-sm font-medium text-slate-700"
+                >
+                  Empresa / Organización
+                </label>
+                <input
+                  id="companyName"
+                  type="text"
+                  autoComplete="organization"
+                  required
+                  value={companyName}
+                  onChange={(event) => setCompanyName(event.target.value)}
+                  disabled={isSubmitting}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-60"
+                  placeholder="Mi Empresa S.L."
+                />
+              </div>
+            </>
+          ) : null}
+
           <div>
             <label
               htmlFor="email"
@@ -174,8 +269,8 @@ export default function LoginPage() {
                 ? "Entrando…"
                 : "Registrando…"
               : mode === "login"
-                ? "Entrar"
-                : "Registrarme"}
+                ? "Iniciar Sesión"
+                : "Crear Cuenta"}
           </button>
         </form>
 
@@ -186,14 +281,10 @@ export default function LoginPage() {
               <button
                 type="button"
                 className="font-medium text-violet-600 hover:text-violet-500"
-                onClick={() => {
-                  setMode("register");
-                  setError(null);
-                  setInfo(null);
-                }}
+                onClick={() => switchMode("register")}
                 disabled={isSubmitting}
               >
-                Registrarme
+                Crear Cuenta
               </button>
             </>
           ) : (
@@ -202,14 +293,10 @@ export default function LoginPage() {
               <button
                 type="button"
                 className="font-medium text-violet-600 hover:text-violet-500"
-                onClick={() => {
-                  setMode("login");
-                  setError(null);
-                  setInfo(null);
-                }}
+                onClick={() => switchMode("login")}
                 disabled={isSubmitting}
               >
-                Iniciar sesión
+                Iniciar Sesión
               </button>
             </>
           )}
