@@ -1,7 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { FALLBACK_TEST_TENANT_ID } from "@/lib/groups";
 
-/** Tenant por defecto para desarrollo local cuando profiles.tenant_id es NULL. */
-export const DEFAULT_DEV_TENANT_ID = "cbd62767-1644-477c-a496-e26ea31dc109";
+/** Alias del tenant canónico local (`FALLBACK_TEST_TENANT_ID` en lib/groups). */
+export const DEFAULT_DEV_TENANT_ID = FALLBACK_TEST_TENANT_ID;
 
 export const DEFAULT_DEV_TENANT_NAME = "Local Dev Tenant";
 

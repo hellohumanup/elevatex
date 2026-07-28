@@ -55,7 +55,20 @@ export async function updateSession(request: NextRequest) {
       (pathname === "/login" || pathname.startsWith("/login/"))
     ) {
       const redirectUrl = request.nextUrl.clone();
-      redirectUrl.pathname = "/admin/surveys";
+      redirectUrl.pathname = "/dashboard";
+      redirectUrl.search = "";
+
+      const redirectResponse = NextResponse.redirect(redirectUrl);
+      copySupabaseCookies(supabaseResponse, redirectResponse);
+      return redirectResponse;
+    }
+
+    if (
+      !user &&
+      (pathname === "/dashboard" || pathname.startsWith("/dashboard/"))
+    ) {
+      const redirectUrl = request.nextUrl.clone();
+      redirectUrl.pathname = "/login";
       redirectUrl.search = "";
 
       const redirectResponse = NextResponse.redirect(redirectUrl);

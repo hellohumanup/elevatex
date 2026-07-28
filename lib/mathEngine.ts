@@ -2,20 +2,108 @@
 export type GraphLink = {
   source: string;
   target: string;
+  /**
+   * Peso del voto según la posición en la dinámica.
+   * Si se omite, se trata como 1 (arco plano / legado).
+   */
+  weight?: number;
 };
 
 /** Nodo del sociograma con métricas de influencia. */
 export type SociogramNode = {
   id: string;
   name: string;
+  /** Indegree plano: número de conexiones entrantes (cada arco cuenta 1). */
   votes: number;
+  /** Indegree ponderado: suma de pesos de las conexiones entrantes. */
+  weightedVotes?: number;
 };
 
 /** Mapa de indegree: ID del nodo → número de votos/conexiones entrantes recibidas. */
 export type IndegreeMap = Readonly<Record<string, number>>;
 
+/**
+ * Mapa de indegree ponderado: ID del nodo → suma de pesos recibidos.
+ * Voto 1 → 1.0 · Voto 2 → 0.7 · Voto 3 → 0.4
+ */
+export type WeightedIndegreeMap = Readonly<Record<string, number>>;
+
+/** Nominación ponderada extraída del JSONB `answers`. */
+export type WeightedNomination = {
+  targetId: string;
+  /** Peso según posición (1-based index → 1.0 / 0.7 / 0.4). */
+  weight: number;
+  /** Posición 1-based en la lista de la pregunta ONA. */
+  position: number;
+  /** Canal de origen (`influencia`, `comunicacion`, …). */
+  channel: string;
+};
+
+/**
+ * Pesos por posición de voto en la dinámica ONA.
+ * Índice 0 = Voto 1, índice 1 = Voto 2, índice 2 = Voto 3.
+ */
+export const VOTE_POSITION_WEIGHTS = [1.0, 0.7, 0.4] as const;
+
+/** Devuelve el peso de un voto según su índice 0-based en la lista. */
+export function getVotePositionWeight(positionIndex: number): number {
+  if (!Number.isFinite(positionIndex) || positionIndex < 0) {
+    return 0;
+  }
+
+  const index = Math.floor(positionIndex);
+
+  if (index < VOTE_POSITION_WEIGHTS.length) {
+    return VOTE_POSITION_WEIGHTS[index];
+  }
+
+  return VOTE_POSITION_WEIGHTS[VOTE_POSITION_WEIGHTS.length - 1];
+}
+
 /** Mapa de reciprocidad: ID del colaborador → conexiones mutuas con otros miembros. */
 export type ReciprocityMap = Readonly<Record<string, number>>;
+
+/**
+ * Reciprocidad individual: proporción de aristas incidentes (emitidas o recibidas)
+ * que tienen arco inverso.
+ */
+export type IndividualNetworkReciprocity = {
+  /** Pares no ordenados {A,B} mutuos en los que participa el nodo. */
+  mutualPairs: number;
+  /** Aristas dirigidas incidentes con reverse existente. */
+  reciprocatedEdgeCount: number;
+  /** Aristas dirigidas incidentes (out + in, topología única en la matriz). */
+  incidentEdgeCount: number;
+  /** reciprocatedEdgeCount / incidentEdgeCount (0–1). */
+  reciprocityRatio: number;
+  /** Porcentaje 0–100. */
+  reciprocityPercent: number;
+};
+
+/**
+ * Reciprocidad global de red + desglose por participante.
+ * Índice global = aristas recíprocas / aristas activas (matriz de adyacencia).
+ */
+export type NetworkReciprocityResult = {
+  /** Pares {A,B} con A→B y B→A. */
+  mutualPairCount: number;
+  /**
+   * Aristas dirigidas que forman parte de un par recíproco.
+   * Equivale a `mutualLinkCount` en el payload ElevateX.
+   */
+  reciprocalEdgeCount: number;
+  /** Total de aristas dirigidas activas (celdas > 0 en la matriz). */
+  activeEdgeCount: number;
+  /** reciprocalEdgeCount / activeEdgeCount (0–1). */
+  reciprocityRatio: number;
+  /** Porcentaje global 0–100. */
+  reciprocityPercent: number;
+  /** Alias de reciprocalEdgeCount (compatibilidad ElevateX / networkMetrics). */
+  mutualLinkCount: number;
+  byParticipant: Readonly<Record<string, IndividualNetworkReciprocity>>;
+  /** Atajo id → reciprocityPercent individual. */
+  individualReciprocityPercent: Readonly<Record<string, number>>;
+};
 
 /** Matriz de adyacencia dirigida: source → (target → peso de arcos). */
 export type DirectedAdjacencyMatrix = ReadonlyMap<string, ReadonlyMap<string, number>>;
@@ -186,19 +274,33 @@ function appendUniqueIds(target: string[], source: readonly string[]): void {
   }
 }
 
-function parseAnswersRecord(record: Record<string, unknown>): string[] {
-  const ids: string[] = [];
+function parseWeightedAnswersRecord(
+  record: Record<string, unknown>,
+): WeightedNomination[] {
+  const nominations: WeightedNomination[] = [];
 
   for (const key of ONA_CHOICE_KEYS) {
-    if (key in record) {
-      appendUniqueIds(ids, collectParticipantIdsFromArray(record[key]));
+    if (!(key in record)) {
+      continue;
     }
+
+    const ids = collectParticipantIdsFromArray(record[key]);
+
+    ids.forEach((targetId, positionIndex) => {
+      nominations.push({
+        targetId,
+        weight: getVotePositionWeight(positionIndex),
+        position: positionIndex + 1,
+        channel: key,
+      });
+    });
   }
 
-  if (ids.length > 0) {
-    return ids;
+  if (nominations.length > 0) {
+    return nominations;
   }
 
+  // Fallback: arrays no numéricos desconocidos (sin claves ONA canónicas).
   for (const [key, value] of Object.entries(record)) {
     if (RESPONSE_METADATA_KEYS.has(key)) {
       continue;
@@ -208,12 +310,22 @@ function parseAnswersRecord(record: Record<string, unknown>): string[] {
       continue;
     }
 
-    if (Array.isArray(value)) {
-      appendUniqueIds(ids, collectParticipantIdsFromArray(value));
+    if (!Array.isArray(value)) {
+      continue;
     }
+
+    const ids = collectParticipantIdsFromArray(value);
+    ids.forEach((targetId, positionIndex) => {
+      nominations.push({
+        targetId,
+        weight: getVotePositionWeight(positionIndex),
+        position: positionIndex + 1,
+        channel: key,
+      });
+    });
   }
 
-  return ids;
+  return nominations;
 }
 
 function normalizeAnswersPayload(answers: unknown): unknown {
@@ -255,14 +367,42 @@ export function extractRespondentNameFromAnswers(
 
 /** Normaliza el JSONB `answers` de Supabase a IDs de string comparables. */
 export function parseResponseAnswers(answers: unknown): string[] {
+  const nominations = parseWeightedResponseAnswers(answers);
+  const ids: string[] = [];
+  appendUniqueIds(
+    ids,
+    nominations.map((nomination) => nomination.targetId),
+  );
+  return ids;
+}
+
+/**
+ * Extrae nominaciones ONA con peso por posición de voto.
+ * - Posición 1 → 1.0
+ * - Posición 2 → 0.7
+ * - Posición 3 → 0.4
+ *
+ * Cada canal (`influencia`, `comunicacion`, …) genera sus propias nominaciones;
+ * los arcos paralelos entre canales se conservan.
+ */
+export function parseWeightedResponseAnswers(
+  answers: unknown,
+): WeightedNomination[] {
   const normalized = normalizeAnswersPayload(answers);
 
   if (Array.isArray(normalized)) {
-    return collectParticipantIdsFromArray(normalized);
+    return collectParticipantIdsFromArray(normalized).map(
+      (targetId, positionIndex) => ({
+        targetId,
+        weight: getVotePositionWeight(positionIndex),
+        position: positionIndex + 1,
+        channel: "list",
+      }),
+    );
   }
 
   if (normalized && typeof normalized === "object") {
-    return parseAnswersRecord(normalized as Record<string, unknown>);
+    return parseWeightedAnswersRecord(normalized as Record<string, unknown>);
   }
 
   return [];
@@ -281,6 +421,7 @@ function debugOnaMatrix(
     | IndegreeMap
     | ReciprocityMap
     | NetworkDensity
+    | NetworkReciprocityResult
     | Record<string, unknown>,
 ): void {
   if (!ONA_DEBUG) {
@@ -298,12 +439,18 @@ function normalizeGraphLink(link: GraphLink): GraphLink | null {
     return null;
   }
 
-  return { source, target };
+  const weight =
+    typeof link.weight === "number" && Number.isFinite(link.weight)
+      ? link.weight
+      : 1;
+
+  return { source, target, weight };
 }
 
 /**
- * Construye la matriz de adyacencia dirigida ponderada.
- * Cada enlace explícito en `links` incrementa en 1 el arco source → target.
+ * Construye la matriz de adyacencia dirigida.
+ * Cada enlace explícito en `links` incrementa en 1 el arco source → target
+ * (conteo topológico plano; el peso del voto no altera esta matriz).
  */
 export function buildDirectedAdjacencyMatrix(
   links: readonly GraphLink[],
@@ -318,6 +465,30 @@ export function buildDirectedAdjacencyMatrix(
 
     const row = matrix.get(link.source) ?? new Map<string, number>();
     row.set(link.target, (row.get(link.target) ?? 0) + 1);
+    matrix.set(link.source, row);
+  }
+
+  return matrix;
+}
+
+/**
+ * Matriz de adyacencia ponderada: cada arco acumula el `weight` del voto
+ * (posición 1 → 1.0, 2 → 0.7, 3 → 0.4).
+ */
+export function buildWeightedDirectedAdjacencyMatrix(
+  links: readonly GraphLink[],
+): DirectedAdjacencyMatrix {
+  const matrix = new Map<string, Map<string, number>>();
+
+  for (const rawLink of links) {
+    const link = normalizeGraphLink(rawLink);
+    if (!link) {
+      continue;
+    }
+
+    const arcWeight = link.weight ?? 1;
+    const row = matrix.get(link.source) ?? new Map<string, number>();
+    row.set(link.target, (row.get(link.target) ?? 0) + arcWeight);
     matrix.set(link.source, row);
   }
 
@@ -341,9 +512,9 @@ function sortedPairKey(nodeA: string, nodeB: string): string {
 }
 
 /**
- * Calcula el indegree (grado entrante) de cada nodo a partir de los enlaces del grafo.
- * En contexto sociométrico, cada arco dirigido source → target es un voto hacia target.
- * Los arcos paralelos (p. ej. influencia + comunicación) se acumulan.
+ * Calcula el indegree (grado entrante) plano de cada nodo.
+ * En contexto sociométrico, cada arco dirigido source → target cuenta como 1 voto,
+ * con independencia del peso posicional. Los arcos paralelos se acumulan.
  */
 export function calculateIndegree(links: readonly GraphLink[]): IndegreeMap {
   const adjacency = buildDirectedAdjacencyMatrix(links);
@@ -359,6 +530,38 @@ export function calculateIndegree(links: readonly GraphLink[]): IndegreeMap {
   debugOnaMatrix("Vector de indegree (votos entrantes por ID)", indegree);
 
   return indegree;
+}
+
+/**
+ * Calcula el indegree ponderado: suma de pesos de las conexiones recibidas.
+ * - Voto 1 (posición 1) → +1.0
+ * - Voto 2 (posición 2) → +0.7
+ * - Voto 3 (posición 3) → +0.4
+ * Enlaces sin `weight` aportan 1 (compatibilidad con grafos legados).
+ */
+export function calculateWeightedIndegree(
+  links: readonly GraphLink[],
+): WeightedIndegreeMap {
+  const adjacency = buildWeightedDirectedAdjacencyMatrix(links);
+  const weightedIndegree: Record<string, number> = {};
+
+  for (const [, targets] of adjacency) {
+    for (const [target, weight] of targets) {
+      weightedIndegree[target] =
+        Math.round(((weightedIndegree[target] ?? 0) + weight) * 1000) / 1000;
+    }
+  }
+
+  debugOnaMatrix(
+    "Matriz de adyacencia (weightedIndegree)",
+    serializeAdjacencyMatrix(adjacency),
+  );
+  debugOnaMatrix(
+    "Vector de weightedIndegree (pesos entrantes por ID)",
+    weightedIndegree,
+  );
+
+  return weightedIndegree;
 }
 
 /**
@@ -403,6 +606,146 @@ export function calculateReciprocity(
   return reciprocity;
 }
 
+function emptyIndividualReciprocity(): IndividualNetworkReciprocity {
+  return {
+    mutualPairs: 0,
+    reciprocatedEdgeCount: 0,
+    incidentEdgeCount: 0,
+    reciprocityRatio: 0,
+    reciprocityPercent: 0,
+  };
+}
+
+function roundRatio(value: number): number {
+  return Math.round(value * 10000) / 10000;
+}
+
+function roundPercent(ratio: number): number {
+  return Math.round(ratio * 10000) / 100;
+}
+
+/**
+ * Reciprocidad de red a partir de la matriz de adyacencia dirigida.
+ *
+ * Global:
+ * - Arista activa = celda source→target > 0
+ * - Arista recíproca = existe también target→source
+ * - Índice = reciprocalEdgeCount / activeEdgeCount
+ *
+ * Individual (por participante P):
+ * - % de votos emitidos o recibidos que están correspondidos
+ *   = aristas incidentes con reverse / aristas incidentes (out + in)
+ */
+export function calculateNetworkReciprocity(
+  links: readonly GraphLink[],
+  participantIds: readonly string[] = [],
+): NetworkReciprocityResult {
+  const adjacency = buildDirectedAdjacencyMatrix(links);
+  const nodeIds = new Set<string>(
+    participantIds.map((id) => normalizeParticipantId(id)).filter(Boolean),
+  );
+
+  for (const [source, targets] of adjacency) {
+    nodeIds.add(source);
+    for (const target of targets.keys()) {
+      nodeIds.add(target);
+    }
+  }
+
+  const byParticipant: Record<string, IndividualNetworkReciprocity> = {};
+  for (const nodeId of nodeIds) {
+    byParticipant[nodeId] = emptyIndividualReciprocity();
+  }
+
+  let activeEdgeCount = 0;
+  let reciprocalEdgeCount = 0;
+  let mutualPairCount = 0;
+  const processedPairs = new Set<string>();
+
+  for (const [source, targets] of adjacency) {
+    for (const [target, forwardWeight] of targets) {
+      if (source === target || forwardWeight <= 0) {
+        continue;
+      }
+
+      activeEdgeCount += 1;
+
+      const reverseWeight = adjacency.get(target)?.get(source) ?? 0;
+      const isReciprocal = reverseWeight > 0;
+
+      if (isReciprocal) {
+        reciprocalEdgeCount += 1;
+      }
+
+      // Out-edge de `source` e in-edge de `target` (misma arista dirigida).
+      const sourceStats = byParticipant[source] ?? emptyIndividualReciprocity();
+      sourceStats.incidentEdgeCount += 1;
+      if (isReciprocal) {
+        sourceStats.reciprocatedEdgeCount += 1;
+      }
+      byParticipant[source] = sourceStats;
+
+      const targetStats = byParticipant[target] ?? emptyIndividualReciprocity();
+      targetStats.incidentEdgeCount += 1;
+      if (isReciprocal) {
+        targetStats.reciprocatedEdgeCount += 1;
+      }
+      byParticipant[target] = targetStats;
+
+      if (isReciprocal) {
+        const pairKey = sortedPairKey(source, target);
+        if (!processedPairs.has(pairKey)) {
+          processedPairs.add(pairKey);
+          mutualPairCount += 1;
+          sourceStats.mutualPairs += 1;
+          targetStats.mutualPairs += 1;
+        }
+      }
+    }
+  }
+
+  const individualReciprocityPercent: Record<string, number> = {};
+
+  for (const [nodeId, stats] of Object.entries(byParticipant)) {
+    const ratio =
+      stats.incidentEdgeCount > 0
+        ? stats.reciprocatedEdgeCount / stats.incidentEdgeCount
+        : 0;
+    stats.reciprocityRatio = roundRatio(ratio);
+    stats.reciprocityPercent = roundPercent(ratio);
+    individualReciprocityPercent[nodeId] = stats.reciprocityPercent;
+  }
+
+  const reciprocityRatio =
+    activeEdgeCount > 0 ? reciprocalEdgeCount / activeEdgeCount : 0;
+
+  const result: NetworkReciprocityResult = {
+    mutualPairCount,
+    reciprocalEdgeCount,
+    activeEdgeCount,
+    reciprocityRatio: roundRatio(reciprocityRatio),
+    reciprocityPercent: roundPercent(reciprocityRatio),
+    mutualLinkCount: reciprocalEdgeCount,
+    byParticipant,
+    individualReciprocityPercent,
+  };
+
+  debugOnaMatrix(
+    "Matriz de adyacencia (networkReciprocity)",
+    serializeAdjacencyMatrix(adjacency),
+  );
+  debugOnaMatrix("Reciprocidad de red (global + individual)", {
+    mutualPairCount: result.mutualPairCount,
+    reciprocalEdgeCount: result.reciprocalEdgeCount,
+    activeEdgeCount: result.activeEdgeCount,
+    reciprocityRatio: result.reciprocityRatio,
+    reciprocityPercent: result.reciprocityPercent,
+    individualReciprocityPercent: result.individualReciprocityPercent,
+  });
+
+  return result;
+}
+
 /**
  * Identifica colaboradores aislados: miembros del equipo con 0 votos recibidos.
  * Compara el roster completo contra el mapa de indegree previamente calculado.
@@ -420,7 +763,11 @@ export function calculateIsolation(
     .sort((a, b) => a.name.localeCompare(b.name, "es"));
 }
 
-/** Construye enlaces del grafo a partir de las respuestas almacenadas en Supabase. */
+/**
+ * Construye enlaces del grafo a partir de las respuestas almacenadas en Supabase.
+ * Cada nominación conserva su peso posicional (1.0 / 0.7 / 0.4).
+ * Los arcos paralelos entre canales ONA (influencia + comunicación) se conservan.
+ */
 export function buildGraphLinksFromResponses(
   participants: readonly { id: string | number }[],
   responses: readonly { participant_id: string | number | null; answers: unknown }[],
@@ -439,30 +786,46 @@ export function buildGraphLinksFromResponses(
 
     const source = normalizeParticipantId(String(response.participant_id));
 
-    for (const targetId of parseResponseAnswers(response.answers)) {
-      const normalizedTarget = normalizeParticipantId(targetId);
+    for (const nomination of parseWeightedResponseAnswers(response.answers)) {
+      const normalizedTarget = normalizeParticipantId(nomination.targetId);
 
-      if (participantIds.has(source) && participantIds.has(normalizedTarget)) {
-        links.push({ source, target: normalizedTarget });
+      if (
+        !participantIds.has(source) ||
+        !participantIds.has(normalizedTarget) ||
+        source === normalizedTarget
+      ) {
+        continue;
       }
+
+      links.push({
+        source,
+        target: normalizedTarget,
+        weight: nomination.weight,
+      });
     }
   }
 
   return links;
 }
 
-/** Construye nodos del sociograma con el indegree calculado desde los enlaces. */
+/** Construye nodos del sociograma con indegree plano y ponderado. */
 export function buildGraphNodes(
   participants: readonly { id: string | number; name: string }[],
   links: readonly GraphLink[],
 ): SociogramNode[] {
   const indegree = calculateIndegree(links);
+  const weightedIndegree = calculateWeightedIndegree(links);
 
-  return participants.map((participant) => ({
-    id: String(participant.id),
-    name: participant.name,
-    votes: indegree[String(participant.id)] ?? 0,
-  }));
+  return participants.map((participant) => {
+    const id = String(participant.id);
+
+    return {
+      id,
+      name: participant.name,
+      votes: indegree[id] ?? 0,
+      weightedVotes: weightedIndegree[id] ?? 0,
+    };
+  });
 }
 
 /**
@@ -587,6 +950,7 @@ export type ReciprocityLeader = {
 
 export type GroupOnaMetrics = {
   networkDensity: NetworkDensity;
+  networkReciprocity: NetworkReciprocityResult;
   links: GraphLink[];
   nodes: SociogramNode[];
   influenceLeaders: InfluenceLeader[];
@@ -667,6 +1031,10 @@ export function computeGroupOnaMetrics(
     graphParticipants.length,
     links,
   );
+  const networkReciprocity = calculateNetworkReciprocity(
+    links,
+    graphParticipants.map((participant) => participant.id),
+  );
   const nodes = buildGraphNodes(graphParticipants, links);
   const influenceLeaders = buildInfluenceLeaders(links, nameById, topLeaders);
   const reciprocityLeaders = buildReciprocityLeaders(
@@ -683,6 +1051,7 @@ export function computeGroupOnaMetrics(
 
   return {
     networkDensity,
+    networkReciprocity,
     links,
     nodes,
     influenceLeaders,
@@ -691,5 +1060,165 @@ export function computeGroupOnaMetrics(
     silos,
     leaderNames: influenceLeaders.map((leader) => leader.name),
     isolatedNames: isolatedParticipants.map((participant) => participant.name),
+  };
+}
+
+/** Colaborador de entrada para `calculateNetworkMetrics`. */
+export type NetworkMetricsParticipantInput = {
+  id: number | string;
+  name: string;
+};
+
+/** Respuesta sociométrica: array plano de IDs o JSONB legacy de Supabase. */
+export type NetworkMetricsResponseInput = {
+  participant_id: number | string | null;
+  answers: (number | string)[] | unknown;
+};
+
+/** Mapa id → conteo de grado (entrante o saliente). */
+export type NetworkDegreeMap = Readonly<Record<string, number>>;
+
+/** Influencer del top por votos recibidos. */
+export type NetworkMetricsInfluencer = {
+  id: string;
+  name: string;
+  inDegree: number;
+};
+
+/**
+ * Resultado agregado de densidad, grados, reciprocidad e influencers.
+ * Densidad y reciprocidad se expresan en porcentaje 0–100.
+ */
+export type CalculatedNetworkMetrics = {
+  /** L / (N × (N − 1)) × 100 — arcos dirigidos únicos sobre el máximo posible. */
+  density: number;
+  /** Votos recibidos por colaborador (id → conteo). */
+  inDegree: NetworkDegreeMap;
+  /** Votos emitidos por colaborador (id → conteo). */
+  outDegree: NetworkDegreeMap;
+  /**
+   * Pares mutuos {A,B} / C(N, 2) × 100 —
+   * reciprocidad sobre el máximo de conexiones bidireccionales posibles.
+   */
+  reciprocityRate: number;
+  /** Colaboradores con 0 votos recibidos. */
+  isolatedParticipants: Array<{ id: string; name: string }>;
+  /** Top 3 por inDegree (desempate alfabético). */
+  topInfluencers: NetworkMetricsInfluencer[];
+};
+
+/**
+ * Calcula métricas ONA puras a partir del roster y respuestas planas.
+ * No toca Supabase ni UI: solo aritmética de red dirigida.
+ */
+export function calculateNetworkMetrics(
+  participants: readonly NetworkMetricsParticipantInput[],
+  responses: readonly NetworkMetricsResponseInput[],
+): CalculatedNetworkMetrics {
+  const roster = participants.map((participant) => ({
+    id: String(participant.id).trim(),
+    name: participant.name,
+  }));
+  const rosterIds = new Set(roster.map((participant) => participant.id));
+
+  // Inicializa grados a 0 para todo el equipo (incluye aislados).
+  const inDegree: Record<string, number> = {};
+  const outDegree: Record<string, number> = {};
+  for (const participant of roster) {
+    inDegree[participant.id] = 0;
+    outDegree[participant.id] = 0;
+  }
+
+  // Arcos dirigidos únicos A→B (evita densidades > 100% por votos repetidos).
+  const directedEdges = new Set<string>();
+
+  for (const response of responses) {
+    if (response.participant_id === null || response.participant_id === undefined) {
+      continue;
+    }
+
+    const source = String(response.participant_id).trim();
+    if (!rosterIds.has(source)) {
+      continue;
+    }
+
+    // Acepta arrays planos o el JSONB real de Supabase (influencia, comunicación…).
+    const nominationIds = Array.isArray(response.answers)
+      ? response.answers.map((value) => String(value).trim()).filter(Boolean)
+      : parseResponseAnswers(response.answers);
+
+    for (const rawTarget of nominationIds) {
+      const target = String(rawTarget).trim();
+      if (!rosterIds.has(target) || source === target) {
+        continue;
+      }
+
+      // Cada nominación suma 1 al outDegree del emisor y al inDegree del receptor.
+      outDegree[source] = (outDegree[source] ?? 0) + 1;
+      inDegree[target] = (inDegree[target] ?? 0) + 1;
+      directedEdges.add(`${source}\u2192${target}`);
+    }
+  }
+
+  const n = roster.length;
+  // Máximo de arcos dirigidos posibles en un digrafo simple sin bucles.
+  const maxDirectedEdges = n > 1 ? n * (n - 1) : 0;
+  // Densidad (%) = conexiones reales / máximo posible.
+  const density =
+    maxDirectedEdges > 0
+      ? Math.round((directedEdges.size / maxDirectedEdges) * 10000) / 100
+      : 0;
+
+  // Pares mutuos: A→B y B→A existen.
+  let mutualPairCount = 0;
+  for (const edge of directedEdges) {
+    const separator = edge.indexOf("\u2192");
+    if (separator <= 0) {
+      continue;
+    }
+    const source = edge.slice(0, separator);
+    const target = edge.slice(separator + 1);
+    // Contar cada par una sola vez (solo cuando source < target lexicográficamente).
+    if (source < target && directedEdges.has(`${target}\u2192${source}`)) {
+      mutualPairCount += 1;
+    }
+  }
+
+  // Máximo de conexiones bidireccionales posibles = C(N, 2) = N×(N−1)/2.
+  const maxBidirectionalPairs = n > 1 ? (n * (n - 1)) / 2 : 0;
+  const reciprocityRate =
+    maxBidirectionalPairs > 0
+      ? Math.round((mutualPairCount / maxBidirectionalPairs) * 10000) / 100
+      : 0;
+
+  // Aislados: inDegree === 0.
+  const isolatedParticipants = roster
+    .filter((participant) => (inDegree[participant.id] ?? 0) === 0)
+    .map((participant) => ({
+      id: participant.id,
+      name: participant.name,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, "es"));
+
+  // Top 3 influencers por votos recibidos.
+  const topInfluencers = [...roster]
+    .map((participant) => ({
+      id: participant.id,
+      name: participant.name,
+      inDegree: inDegree[participant.id] ?? 0,
+    }))
+    .sort(
+      (a, b) =>
+        b.inDegree - a.inDegree || a.name.localeCompare(b.name, "es"),
+    )
+    .slice(0, 3);
+
+  return {
+    density,
+    inDegree,
+    outDegree,
+    reciprocityRate,
+    isolatedParticipants,
+    topInfluencers,
   };
 }

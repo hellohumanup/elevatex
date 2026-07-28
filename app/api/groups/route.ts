@@ -3,9 +3,14 @@ import {
   DEMO_DASHBOARD_ORGANIZATION_ID,
   type GroupRecord,
 } from "@/lib/groups";
+import { resolveOptionalManagerId } from "@/lib/managers";
 import { normalizeOrganizationId } from "@/lib/organizations";
 import { ensureOrganizationWithServiceRole } from "@/lib/organizations-admin";
-import { FALLBACK_TEST_TENANT_ID, createSupabaseServiceRoleClient } from "@/lib/supabase/service-role";
+import type { GroupInsert } from "@/lib/supabase/database.types";
+import {
+  FALLBACK_TEST_TENANT_ID,
+  createSupabaseServiceRoleClient,
+} from "@/lib/supabase/service-role";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +18,7 @@ type CreateGroupBody = {
   name?: string;
   age_band?: string;
   organization_id?: string | null;
+  /** UUID opcional de managers.id — null en pruebas locales. */
   manager_id?: string | null;
 };
 
@@ -71,14 +77,15 @@ export async function POST(request: Request) {
     );
   }
 
-  const managerId = normalizeOrganizationId(body.manager_id);
+  // Opcional: no forzar managers.id (retrocompatibilidad local).
+  const managerId = resolveOptionalManagerId(body.manager_id);
 
   console.log("[BACKEND MULTI-TENANT] Insertando grupo con tenant:", {
     organization_id: organizationId,
     manager_id: managerId,
   });
 
-  const payload = {
+  const payload: GroupInsert = {
     name,
     age_band: ageBand,
     organization_id: ensuredOrganization.id,
@@ -90,12 +97,15 @@ export async function POST(request: Request) {
     .from("groups")
     .insert(payload)
     .select(GROUP_COLUMNS)
-    .single();
+    .single<GroupRecord>();
 
   if (error) {
     console.error("[api/groups] insert falló:", error);
-    return NextResponse.json({ error: error.message, code: error.code }, { status: 500 });
+    return NextResponse.json(
+      { error: error.message, code: error.code },
+      { status: 500 },
+    );
   }
 
-  return NextResponse.json({ data: data as GroupRecord, error: null });
+  return NextResponse.json({ data, error: null });
 }

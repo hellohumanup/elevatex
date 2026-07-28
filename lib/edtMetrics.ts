@@ -1,8 +1,11 @@
 /**
- * Framework EDT de ElevateX — motor de cálculo diagnóstico.
+ * Framework EDT de ElevateX — motor de cálculo diagnóstico (Likert A–D, P1–P28).
  *
  * Entrada: respuestas con `answers` JSONb (claves "1"–"28", valores A|B|C|D).
  * Codificación: A = 4.00 · B = 3.00 · C = 2.00 · D = 1.00.
+ *
+ * Métricas ONA (centralidad, densidad, reciprocidad, silos) → ver
+ * `lib/elevatexOnaEngine.ts` y `lib/elevatexDiagnosticsServer.ts`.
  */
 
 export const EDT_ANSWER_SCORES = {

@@ -4,8 +4,12 @@ import {
   fetchDefaultEdtSurveyId,
   type EdtAnswerOption,
 } from "@/lib/surveyQuestions";
-import { DEMO_DASHBOARD_ORGANIZATION_ID } from "@/lib/groups";
-import { toSupabaseGroupId } from "@/lib/groupId";
+import {
+  DEMO_DASHBOARD_ORGANIZATION_ID,
+  FALLBACK_TEST_TENANT_ID,
+} from "@/lib/groups";
+import { toNumericSupabaseGroupId } from "@/lib/groupId";
+import { ensureOrganizationWithServiceRole } from "@/lib/organizations-admin";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const EDT_OPTIONS: EdtAnswerOption[] = ["A", "B", "C", "D"];
@@ -174,11 +178,85 @@ function buildHybridAnswersPayload(
 
 const DEV_EDT_SURVEY_FALLBACK = "edt-standard-fallback";
 
+/**
+ * Resuelve el group_id canónico de Supabase a partir del segmento de la URL.
+ * Si el equipo no existe (p. ej. /group/123 sin fila previa), lo provisiona en dev
+ * con ese mismo id para mantener la integridad referencial de participants/responses.
+ */
+async function resolveGroupIdForDevSimulation(
+  supabase: SupabaseClient,
+  routeGroupId: string,
+): Promise<number> {
+  const numericGroupId = toNumericSupabaseGroupId(routeGroupId);
+
+  if (numericGroupId === null) {
+    throw new Error(
+      `El group_id "${routeGroupId}" de la URL no es un identificador numérico válido.`,
+    );
+  }
+
+  const { data: existingGroup, error: lookupError } = await supabase
+    .from("groups")
+    .select("id")
+    .eq("id", numericGroupId)
+    .maybeSingle();
+
+  if (lookupError) {
+    throw new Error(lookupError.message);
+  }
+
+  if (existingGroup?.id != null) {
+    return Number(existingGroup.id);
+  }
+
+  const ensuredOrganization = await ensureOrganizationWithServiceRole({
+    id: DEMO_DASHBOARD_ORGANIZATION_ID,
+    name: "Organización Demo",
+  });
+
+  if (ensuredOrganization.error || !ensuredOrganization.id) {
+    throw new Error(
+      ensuredOrganization.error ??
+        "No se pudo asegurar la organización antes de crear el equipo de simulación.",
+    );
+  }
+
+  const { data: createdGroup, error: insertError } = await supabase
+    .from("groups")
+    .insert({
+      id: numericGroupId,
+      name: `Equipo simulación ${numericGroupId}`,
+      age_band: "25-35",
+      organization_id: ensuredOrganization.id,
+      tenant_id: FALLBACK_TEST_TENANT_ID,
+    })
+    .select("id")
+    .single();
+
+  if (insertError) {
+    throw new Error(
+      `No se pudo crear el equipo ${numericGroupId} para la simulación: ${insertError.message}`,
+    );
+  }
+
+  if (createdGroup?.id == null) {
+    throw new Error(`No se pudo confirmar el equipo ${numericGroupId}.`);
+  }
+
+  return Number(createdGroup.id);
+}
+
 export async function simulateDevVotesForGroup(
   supabase: SupabaseClient,
   groupId: string,
 ): Promise<SimulatedDevVotesResult> {
-  const { surveyId, error: surveyError } = await fetchDefaultEdtSurveyId();
+  if (typeof window !== "undefined") {
+    throw new Error(
+      "simulateDevVotesForGroup solo puede ejecutarse en el servidor (API /api/dev/simulate-votes).",
+    );
+  }
+
+  const { surveyId, error: surveyError } = await fetchDefaultEdtSurveyId(supabase);
 
   let resolvedSurveyId = surveyId;
 
@@ -200,14 +278,14 @@ export async function simulateDevVotesForGroup(
   const dbSurveyId =
     resolvedSurveyId === DEV_EDT_SURVEY_FALLBACK ? null : resolvedSurveyId;
 
-  const supabaseGroupId = toSupabaseGroupId(groupId);
+  const resolvedGroupId = await resolveGroupIdForDevSimulation(supabase, groupId);
   const responseCount = randomInt(10, 15);
   const fictitiousNames = buildFictitiousNames(responseCount);
 
   const { error: groupOrgError } = await supabase
     .from("groups")
     .update({ organization_id: DEMO_DASHBOARD_ORGANIZATION_ID })
-    .eq("id", supabaseGroupId);
+    .eq("id", resolvedGroupId);
 
   if (groupOrgError) {
     throw new Error(groupOrgError.message);
@@ -216,7 +294,7 @@ export async function simulateDevVotesForGroup(
   const { error: deleteResponsesError } = await supabase
     .from("responses")
     .delete()
-    .eq("group_id", supabaseGroupId);
+    .eq("group_id", resolvedGroupId);
 
   if (deleteResponsesError) {
     throw new Error(deleteResponsesError.message);
@@ -225,7 +303,7 @@ export async function simulateDevVotesForGroup(
   const { error: deleteParticipantsError } = await supabase
     .from("participants")
     .delete()
-    .eq("group_id", supabaseGroupId);
+    .eq("group_id", resolvedGroupId);
 
   if (deleteParticipantsError) {
     throw new Error(deleteParticipantsError.message);
@@ -236,7 +314,7 @@ export async function simulateDevVotesForGroup(
     .insert(
       fictitiousNames.map((name) => ({
         name,
-        group_id: supabaseGroupId,
+        group_id: resolvedGroupId,
       })),
     )
     .select("id, name, group_id");
@@ -258,7 +336,7 @@ export async function simulateDevVotesForGroup(
   );
 
   const responseRows = insertedParticipants.map((participant) => ({
-    group_id: supabaseGroupId,
+    group_id: resolvedGroupId,
     participant_id: participant.id,
     ...(dbSurveyId ? { survey_id: dbSurveyId } : {}),
     answers: buildHybridAnswersPayload(

@@ -9,7 +9,7 @@ BEGIN;
 
 INSERT INTO public.tenants (id, name)
 VALUES (
-  'cbd62767-1644-477c-a496-e26ea31dc109',
+  'cbd62767-1644-477c-a496-e26090532585',
   'Local Dev Tenant'
 )
 ON CONFLICT (id) DO NOTHING;

@@ -1,8 +1,37 @@
 import { toSupabaseGroupId } from "@/lib/groupId";
 import { createClientComponentClient } from "@/lib/supabase/auth-helpers-nextjs-shim";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const STANDARD_EDT_SURVEY_TITLE =
   "Evaluación de Dinámicas de Trabajo (EDT) Estándar";
+
+/** Plantilla global sembrada en migración 018. */
+export const ONA_ELITE_SURVEY_ID =
+  "a1000001-0001-4000-8000-000000000000" as const;
+
+export const ONA_ELITE_SURVEY_NAME = "ONA Élite · Dimensiones";
+
+/** Dimensiones ONA de élite para campañas dinámicas de evaluación. */
+export const ONA_ELITE_DIMENSIONS = [
+  "informacion",
+  "confianza",
+  "innovacion",
+] as const;
+
+export type OnaEliteDimension = (typeof ONA_ELITE_DIMENSIONS)[number];
+
+export const ONA_ELITE_DIMENSION_LABELS: Record<OnaEliteDimension, string> = {
+  informacion: "Información",
+  confianza: "Confianza",
+  innovacion: "Innovación",
+};
+
+/** UUIDs estables del seed 018 (útiles en tests / fixtures). */
+export const ONA_ELITE_QUESTION_IDS: Record<OnaEliteDimension, string> = {
+  informacion: "a1000001-0001-4000-8000-000000000001",
+  confianza: "a1000001-0001-4000-8000-000000000002",
+  innovacion: "a1000001-0001-4000-8000-000000000003",
+};
 
 export type EdtAnswerOption = "A" | "B" | "C" | "D";
 
@@ -36,7 +65,11 @@ export function buildEdtAnswersPayload(
 export function getFirstMissingEdtAnswer(
   answers: Record<number, EdtAnswerOption>,
 ): number | null {
-  for (let questionNumber = 1; questionNumber <= EDT_QUESTION_COUNT; questionNumber += 1) {
+  for (
+    let questionNumber = 1;
+    questionNumber <= EDT_QUESTION_COUNT;
+    questionNumber += 1
+  ) {
     if (answers[questionNumber] === undefined) {
       return questionNumber;
     }
@@ -53,6 +86,18 @@ export type SurveyQuestion = {
   block: string;
 };
 
+/**
+ * Pregunta ONA dinámica (campos canónicos de survey_questions / vista
+ * `ona_elite_questions`).
+ */
+export type OnaSurveyQuestion = {
+  id: string;
+  dimension: string;
+  question_text: string;
+  max_choices: number;
+  created_at: string | null;
+};
+
 export const EDT_ANSWER_OPTIONS: Array<{
   value: EdtAnswerOption;
   label: string;
@@ -64,11 +109,89 @@ export const EDT_ANSWER_OPTIONS: Array<{
   { value: "D", label: "D", description: "Totalmente en desacuerdo" },
 ];
 
-export async function fetchDefaultEdtSurveyId(): Promise<{
+function resolveClient(supabaseClient?: SupabaseClient): SupabaseClient {
+  return supabaseClient ?? createClientComponentClient();
+}
+
+/** Normaliza slug de dimensión (acentos / mayúsculas → canónico). */
+export function normalizeOnaDimension(
+  value: string | null | undefined,
+): OnaEliteDimension | null {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^a-z0-9]+/g, "");
+
+  if (normalized === "informacion" || normalized === "information") {
+    return "informacion";
+  }
+  if (normalized === "confianza" || normalized === "trust") {
+    return "confianza";
+  }
+  if (normalized === "innovacion" || normalized === "innovation") {
+    return "innovacion";
+  }
+
+  return null;
+}
+
+export function isOnaEliteDimension(
+  value: string | null | undefined,
+): value is OnaEliteDimension {
+  return normalizeOnaDimension(value) !== null;
+}
+
+function mapOnaSurveyQuestionRow(
+  row: Record<string, unknown> | null | undefined,
+): OnaSurveyQuestion | null {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+
+  const id = row.id != null ? String(row.id) : "";
+  const dimensionRaw =
+    typeof row.dimension === "string" ? row.dimension.trim() : "";
+  const dimension =
+    normalizeOnaDimension(dimensionRaw) ?? dimensionRaw.toLowerCase();
+  const questionText = String(row.question_text ?? row.text ?? "").trim();
+  const maxChoicesRaw = Number(row.max_choices);
+  const maxChoices =
+    Number.isFinite(maxChoicesRaw) && maxChoicesRaw > 0
+      ? Math.floor(maxChoicesRaw)
+      : 3;
+  const createdAt =
+    typeof row.created_at === "string"
+      ? row.created_at
+      : row.created_at != null
+        ? String(row.created_at)
+        : null;
+
+  if (!id || !questionText) {
+    return null;
+  }
+
+  return {
+    id,
+    dimension,
+    question_text: questionText,
+    max_choices: maxChoices,
+    created_at: createdAt,
+  };
+}
+
+export async function fetchDefaultEdtSurveyId(
+  supabaseClient?: SupabaseClient,
+): Promise<{
   surveyId: string | null;
   error: string | null;
 }> {
-  const supabase = createClientComponentClient();
+  const supabase = resolveClient(supabaseClient);
   const { data, error } = await supabase
     .from("surveys")
     .select("id")
@@ -99,9 +222,19 @@ function mapSurveyQuestionRows(
     .map((row) => ({
       id: String(row.id),
       survey_id: String(row.survey_id),
-      question_number: Number(row.question_number),
-      text: typeof row.text === "string" ? row.text.trim() : "",
-      block: typeof row.block === "string" ? row.block.trim() : "",
+      question_number: Number(row.question_number ?? row.order_index ?? 0),
+      text:
+        typeof row.text === "string"
+          ? row.text.trim()
+          : typeof row.question_text === "string"
+            ? row.question_text.trim()
+            : "",
+      block:
+        typeof row.block === "string"
+          ? row.block.trim()
+          : typeof row.dimension === "string"
+            ? row.dimension.trim()
+            : "",
     }))
     .filter((question) => question.text.length > 0)
     .sort((left, right) => left.question_number - right.question_number);
@@ -112,10 +245,16 @@ export async function fetchSurveyQuestions(
 ): Promise<{ data: SurveyQuestion[]; error: string | null }> {
   try {
     const supabase = createClientComponentClient();
-    const { data, error } = await supabase
+    let query = supabase
       .from("survey_questions")
       .select("*")
       .order("question_number", { ascending: true });
+
+    if (surveyId) {
+      query = query.eq("survey_id", surveyId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error("[surveyQuestions] Error al cargar preguntas:", error);
@@ -123,7 +262,10 @@ export async function fetchSurveyQuestions(
     }
 
     return {
-      data: mapSurveyQuestionRows((data ?? []) as Array<Record<string, unknown>>, surveyId),
+      data: mapSurveyQuestionRows(
+        (data ?? []) as Array<Record<string, unknown>>,
+        surveyId,
+      ),
       error: null,
     };
   } catch (error) {
@@ -133,6 +275,215 @@ export async function fetchSurveyQuestions(
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Carga la pregunta ONA activa para una dimensión de campaña.
+ * Prioridad: vista `ona_elite_questions` → fallback `survey_questions`.
+ */
+export async function fetchOnaQuestionByDimension(
+  dimensionInput: string,
+  supabaseClient?: SupabaseClient,
+): Promise<{ data: OnaSurveyQuestion | null; error: string | null }> {
+  const dimension = normalizeOnaDimension(dimensionInput);
+
+  if (!dimension) {
+    return {
+      data: null,
+      error: `Dimensión ONA no válida: "${dimensionInput}". Usa informacion | confianza | innovacion.`,
+    };
+  }
+
+  const supabase = resolveClient(supabaseClient);
+
+  try {
+    const { data: viewRow, error: viewError } = await supabase
+      .from("ona_elite_questions")
+      .select("id, dimension, question_text, max_choices, created_at")
+      .eq("dimension", dimension)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (!viewError && viewRow) {
+      const mapped = mapOnaSurveyQuestionRow(
+        viewRow as Record<string, unknown>,
+      );
+      if (mapped) {
+        return { data: mapped, error: null };
+      }
+    }
+
+    if (viewError && process.env.NODE_ENV === "development") {
+      console.warn(
+        "[surveyQuestions] Vista ona_elite_questions no disponible, fallback survey_questions:",
+        viewError.message,
+      );
+    }
+
+    const { data: tableRows, error: tableError } = await supabase
+      .from("survey_questions")
+      .select(
+        "id, dimension, question_text, text, max_choices, created_at, question_type",
+      )
+      .eq("question_type", "ona_nomination")
+      .ilike("dimension", dimension)
+      .order("created_at", { ascending: true })
+      .limit(1);
+
+    if (tableError) {
+      console.error(
+        "[surveyQuestions] Error al cargar pregunta ONA por dimensión:",
+        tableError,
+      );
+      return { data: null, error: tableError.message };
+    }
+
+    const firstRow = (tableRows ?? [])[0] as
+      | Record<string, unknown>
+      | undefined;
+    const mapped = mapOnaSurveyQuestionRow(firstRow);
+
+    if (!mapped) {
+      return {
+        data: null,
+        error: `No hay pregunta ONA sembrada para la dimensión "${dimension}". Ejecuta la migración 018.`,
+      };
+    }
+
+    return { data: mapped, error: null };
+  } catch (error) {
+    console.error("[surveyQuestions] Error inesperado (ONA dimensión):", error);
+    return {
+      data: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** Lista las 3 preguntas ONA de élite (catálogo de campaña). */
+export async function fetchOnaEliteQuestions(
+  supabaseClient?: SupabaseClient,
+): Promise<{ data: OnaSurveyQuestion[]; error: string | null }> {
+  const supabase = resolveClient(supabaseClient);
+
+  const { data, error } = await supabase
+    .from("ona_elite_questions")
+    .select("id, dimension, question_text, max_choices, created_at");
+
+  if (error) {
+    const fallback = await Promise.all(
+      ONA_ELITE_DIMENSIONS.map((dimension) =>
+        fetchOnaQuestionByDimension(dimension, supabase),
+      ),
+    );
+    const questions = fallback
+      .map((result) => result.data)
+      .filter((question): question is OnaSurveyQuestion => question !== null);
+
+    if (questions.length === 0) {
+      return { data: [], error: error.message };
+    }
+
+    return { data: questions, error: null };
+  }
+
+  const questions = (data ?? [])
+    .map((row) => mapOnaSurveyQuestionRow(row as Record<string, unknown>))
+    .filter((question): question is OnaSurveyQuestion => question !== null)
+    .sort((left, right) => {
+      const leftIndex = ONA_ELITE_DIMENSIONS.indexOf(
+        normalizeOnaDimension(left.dimension) ?? "informacion",
+      );
+      const rightIndex = ONA_ELITE_DIMENSIONS.indexOf(
+        normalizeOnaDimension(right.dimension) ?? "informacion",
+      );
+      return leftIndex - rightIndex;
+    });
+
+  return { data: questions, error: null };
+}
+
+/**
+ * Resuelve la pregunta activa de la campaña:
+ * 1) `dimension` explícita del mánager
+ * 2) `groups.active_ona_dimension` si se pasa groupId
+ * 3) fallback `informacion`
+ */
+export async function fetchActiveOnaCampaignQuestion(input: {
+  dimension?: string | null;
+  groupId?: string | number | null;
+  supabaseClient?: SupabaseClient;
+}): Promise<{
+  data: OnaSurveyQuestion | null;
+  dimension: OnaEliteDimension;
+  error: string | null;
+}> {
+  const supabase = resolveClient(input.supabaseClient);
+  let dimension = normalizeOnaDimension(input.dimension);
+
+  if (!dimension && input.groupId != null && String(input.groupId).trim()) {
+    const groupId = toSupabaseGroupId(String(input.groupId));
+    const { data: groupRow, error: groupError } = await supabase
+      .from("groups")
+      .select("active_ona_dimension")
+      .eq("id", groupId)
+      .maybeSingle();
+
+    if (groupError && process.env.NODE_ENV === "development") {
+      console.warn(
+        "[surveyQuestions] No se pudo leer groups.active_ona_dimension:",
+        groupError.message,
+      );
+    }
+
+    dimension = normalizeOnaDimension(
+      typeof groupRow?.active_ona_dimension === "string"
+        ? groupRow.active_ona_dimension
+        : null,
+    );
+  }
+
+  const resolvedDimension: OnaEliteDimension = dimension ?? "informacion";
+  const result = await fetchOnaQuestionByDimension(resolvedDimension, supabase);
+
+  return {
+    data: result.data,
+    dimension: resolvedDimension,
+    error: result.error,
+  };
+}
+
+/** Persiste la dimensión activa de campaña elegida por el mánager. */
+export async function setGroupActiveOnaDimension(input: {
+  groupId: string | number;
+  dimension: string;
+  supabaseClient?: SupabaseClient;
+}): Promise<{ success: boolean; error: string | null }> {
+  const dimension = normalizeOnaDimension(input.dimension);
+
+  if (!dimension) {
+    return {
+      success: false,
+      error: `Dimensión inválida: "${input.dimension}".`,
+    };
+  }
+
+  const supabase = resolveClient(input.supabaseClient);
+  const { error } = await supabase
+    .from("groups")
+    .update({ active_ona_dimension: dimension })
+    .eq("id", toSupabaseGroupId(String(input.groupId)));
+
+  if (error) {
+    console.error(
+      "[surveyQuestions] Error al guardar active_ona_dimension:",
+      error,
+    );
+    return { success: false, error: error.message };
+  }
+
+  return { success: true, error: null };
 }
 
 export async function hasExistingSurveyResponse(input: {

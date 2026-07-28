@@ -7,8 +7,12 @@ import { toSupabaseGroupId } from "@/lib/groupId";
 import {
   buildEdtAnswersPayload,
   EDT_ANSWER_OPTIONS,
+  fetchActiveOnaCampaignQuestion,
+  ONA_ELITE_DIMENSION_LABELS,
   STANDARD_EDT_SURVEY_TITLE,
   type EdtAnswerOption,
+  type OnaEliteDimension,
+  type OnaSurveyQuestion,
 } from "@/lib/surveyQuestions";
 
 type Participant = {
@@ -411,6 +415,12 @@ export default function SociometricNativeQuestionnaire({
   const [onaCommunication, setOnaCommunication] = useState<string[]>(
     () => Array.from({ length: ONA_COMMUNICATION_SLOTS }, () => ""),
   );
+  const [activeOnaQuestion, setActiveOnaQuestion] =
+    useState<OnaSurveyQuestion | null>(null);
+  const [activeOnaDimension, setActiveOnaDimension] =
+    useState<OnaEliteDimension | null>(null);
+  const [isLoadingOnaQuestion, setIsLoadingOnaQuestion] = useState(true);
+  const [onaQuestionError, setOnaQuestionError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
@@ -467,6 +477,128 @@ export default function SociometricNativeQuestionnaire({
   const isEdtStepPending =
     activeStep?.kind === "edt" &&
     (questions.length === 0 || currentEdtQuestion == null);
+
+  const onaDimensionLabel = activeOnaDimension
+    ? ONA_ELITE_DIMENSION_LABELS[activeOnaDimension]
+    : null;
+
+  /** Texto dinámico de la campaña; fallback solo si falla la carga. */
+  const onaCampaignQuestionText =
+    activeOnaQuestion?.question_text?.trim() ||
+    (onaQuestionError
+      ? "Selecciona compañeros de tu mismo equipo según la dinámica activa."
+      : null);
+
+  // Pregunta ONA activa de la campaña (dimensión elegida por el mánager).
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadActiveOnaQuestion() {
+      if (!groupId || String(groupId).trim().length === 0) {
+        setActiveOnaQuestion(null);
+        setActiveOnaDimension(null);
+        setIsLoadingOnaQuestion(false);
+        setOnaQuestionError("No se pudo resolver el equipo de la campaña.");
+        return;
+      }
+
+      setIsLoadingOnaQuestion(true);
+      setOnaQuestionError(null);
+
+      try {
+        const result = await fetchActiveOnaCampaignQuestion({
+          groupId,
+          supabaseClient: supabase,
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        const applyLoadedQuestion = (question: OnaSurveyQuestion, dimension: OnaEliteDimension) => {
+          setActiveOnaQuestion(question);
+          setActiveOnaDimension(dimension);
+          setOnaQuestionError(null);
+
+          const maxChoices = question.max_choices;
+          if (Number.isFinite(maxChoices) && maxChoices > 0) {
+            setOnaInfluence((previous) => {
+              if (previous.length === maxChoices) {
+                return previous;
+              }
+
+              return Array.from(
+                { length: maxChoices },
+                (_, index) => previous[index] ?? "",
+              );
+            });
+          }
+        };
+
+        if (result.error || !result.data) {
+          // Fallback HTTP por si el cliente Supabase no ve la vista/migración.
+          const response = await fetch(
+            `/api/survey-questions/active?groupId=${encodeURIComponent(String(groupId))}`,
+            { cache: "no-store" },
+          );
+          const payload = (await response.json()) as {
+            success?: boolean;
+            error?: string;
+            dimension?: OnaEliteDimension;
+            question?: OnaSurveyQuestion;
+          };
+
+          if (cancelled) {
+            return;
+          }
+
+          if (!response.ok || !payload.success || !payload.question) {
+            setActiveOnaQuestion(null);
+            setActiveOnaDimension(result.dimension ?? null);
+            setOnaQuestionError(
+              payload.error ??
+                result.error ??
+                "No se pudo cargar la pregunta de la dinámica.",
+            );
+            return;
+          }
+
+          applyLoadedQuestion(
+            payload.question,
+            payload.dimension ?? result.dimension,
+          );
+          return;
+        }
+
+        applyLoadedQuestion(result.data, result.dimension);
+      } catch (loadError) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error(
+          "[EDT Questionnaire] Error cargando pregunta ONA activa:",
+          loadError,
+        );
+        setActiveOnaQuestion(null);
+        setOnaQuestionError(
+          loadError instanceof Error
+            ? loadError.message
+            : "No se pudo cargar la pregunta de la dinámica.",
+        );
+      } finally {
+        if (!cancelled) {
+          setIsLoadingOnaQuestion(false);
+        }
+      }
+    }
+
+    void loadActiveOnaQuestion();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [groupId, supabase]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1218,25 +1350,59 @@ export default function SociometricNativeQuestionnaire({
               <div className="border-b border-cyan-500/20 px-6 py-4">
                 <p className="text-xs font-semibold uppercase tracking-wide text-cyan-400">
                   Análisis de Redes · ONA
+                  {onaDimensionLabel ? ` · ${onaDimensionLabel}` : ""}
                 </p>
-                <h2 className="mt-2 text-lg font-semibold text-white">
-                  Nominaciones sociométricas
-                </h2>
-                <p className="mt-2 text-sm text-slate-400">
-                  Selecciona compañeros de tu mismo equipo. Usa el buscador para
-                  encontrarlos rápidamente.
-                </p>
+
+                {isLoadingOnaQuestion ? (
+                  <div className="mt-3 space-y-3" aria-live="polite">
+                    <p className="text-sm text-slate-400">
+                      Cargando pregunta de la dinámica...
+                    </p>
+                    <div className="h-5 w-[80%] max-w-xl animate-pulse rounded bg-slate-800/90" />
+                    <div className="h-5 w-[60%] max-w-md animate-pulse rounded bg-slate-800/70" />
+                  </div>
+                ) : (
+                  <>
+                    <h2 className="mt-2 text-lg font-semibold leading-snug text-white">
+                      {onaCampaignQuestionText ??
+                        "Nominaciones sociométricas"}
+                    </h2>
+                    <p className="mt-2 text-sm text-slate-400">
+                      Selecciona compañeros de tu mismo equipo. Usa el buscador
+                      para encontrarlos rápidamente.
+                      {activeOnaQuestion?.max_choices
+                        ? ` Puedes nominar hasta ${activeOnaQuestion.max_choices}.`
+                        : ""}
+                    </p>
+                    {onaQuestionError ? (
+                      <p className="mt-2 text-xs text-amber-300/90">
+                        {onaQuestionError}
+                      </p>
+                    ) : null}
+                  </>
+                )}
               </div>
               <div className="space-y-4 px-6 py-6">
                 {participants.length === 0 ? (
                   <p className="text-sm text-slate-400">
                     No hay compañeros registrados en este equipo todavía.
                   </p>
+                ) : isLoadingOnaQuestion ? (
+                  <div className="space-y-3" aria-hidden>
+                    {Array.from({ length: 3 }).map((_, index) => (
+                      <div
+                        key={`ona-skeleton-${index}`}
+                        className="h-12 animate-pulse rounded-xl bg-slate-800/80"
+                      />
+                    ))}
+                  </div>
                 ) : (
                   <>
                     <div className="space-y-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-violet-300">
-                        Influencia positiva en tu trabajo
+                        {onaDimensionLabel
+                          ? `Nominaciones · ${onaDimensionLabel}`
+                          : "Influencia positiva en tu trabajo"}
                       </p>
                       {onaInfluence.map((value, index) => (
                         <ParticipantSearchSelect

@@ -23,12 +23,16 @@ import {
   calculateIndegree,
   calculateIsolation,
   calculateNetworkDensity,
+  calculateNetworkMetrics,
+  calculateNetworkReciprocity,
   calculateReciprocity,
+  calculateWeightedIndegree,
   detectNetworkSilos,
   extractRespondentNameFromAnswers,
   normalizeParticipantId,
   parseResponseAnswers,
   resolveParticipantDisplayName,
+  type CalculatedNetworkMetrics,
   type GraphLink,
   type IndegreeMap,
   type NetworkDensity,
@@ -36,17 +40,15 @@ import {
   type ParticipantNameLookup,
   type ReciprocityMap,
   type SociogramNode,
+  type WeightedIndegreeMap,
 } from "@/lib/mathEngine";
 import { getSupabase } from "@/lib/supabase";
-import { simulateDevVotesForGroup } from "@/lib/simulateDevVotes";
 import { computeEdtMetrics, type EdtMetricsResult } from "@/lib/edtMetrics";
-import { buildEdtAffinityGraphData } from "@/lib/edtAffinityGraph";
+import type { ElevateXOnaDiagnostics } from "@/lib/elevatexOnaEngine";
 import { resolveRouteGroupId } from "@/lib/groupId";
 import { FALLBACK_TEST_TENANT_ID } from "@/lib/groups";
-import {
-  calculateNetworkMetrics,
-  type NetworkMetricsResult,
-} from "@/lib/networkMetrics";
+import type { NetworkMetricsResult } from "@/lib/networkMetrics";
+import { calculateNetworkDensity as calculateOnaNetworkDensity } from "@/lib/utils/onaMetrics";
 
 /** Bypass de validación multi-tenant en desarrollo local. */
 const IS_LOCAL_DEV = process.env.NODE_ENV === "development";
@@ -62,15 +64,14 @@ const INVALID_GROUP_ID_MESSAGE =
 
 const RESULTADOS_PDF_EXPORT_ID = "resultados-dashboard-pdf";
 
-const GROUP_COLUMNS = "id, name, age_band, created_at, organization_id";
-
-const RESPONSE_COLUMNS =
-  "id, group_id, participant_id, respondent_name, answers, started_at, completed_at";
+const GROUP_NAME_COLUMNS = "id, name";
 
 type Participant = {
   id: string;
   name: string;
   group_id: string;
+  email?: string;
+  survey_status?: "pending_send" | "sent" | "completed";
 };
 
 type Response = {
@@ -81,6 +82,25 @@ type Response = {
   answers: unknown;
   started_at?: string | null;
   completed_at?: string | null;
+};
+
+/** Filas crudas hidratadas desde elevatex-metrics (bypass RLS en servidor). */
+type ElevateXRawParticipant = {
+  id: string;
+  name: string;
+  group_id: string;
+  email?: string | null;
+  survey_status?: "pending_send" | "sent" | "completed" | string | null;
+};
+
+type ElevateXRawResponse = {
+  id: string;
+  group_id: string;
+  participant_id: string | null;
+  respondent_name: string | null;
+  answers: unknown;
+  started_at: string | null;
+  completed_at: string | null;
 };
 
 type AverageResponseTimeResult = {
@@ -100,7 +120,12 @@ type SelectedParticipantProfile = {
   id: string;
   name: string;
   indegree: number;
+  /** Influencia ponderada (suma de pesos 1.0 / 0.7 / 0.4). */
+  weightedIndegree: number;
+  /** Conexiones mutuas (conteo legacy). */
   reciprocity: number;
+  /** % de aristas incidentes correspondidas (0–100). */
+  reciprocityPercent: number;
   silo: string;
 };
 
@@ -126,8 +151,28 @@ type OnaClientMetrics = {
   links: GraphLink[];
   nodes: SociogramNode[];
   indegree: IndegreeMap;
+  /** Suma de pesos posicionales recibidos (1.0 / 0.7 / 0.4). */
+  weightedIndegree: WeightedIndegreeMap;
   reciprocity: ReciprocityMap;
   density: NetworkDensity;
+};
+
+/** Fallback seguro mientras cargan o fallan las métricas ONA. */
+const EMPTY_NETWORK_DENSITY: NetworkDensity = {
+  nodeCount: 0,
+  linkCount: 0,
+  maxPossibleLinks: 0,
+  density: 0,
+  densityPercent: 0,
+};
+
+const EMPTY_ONA_METRICS: OnaClientMetrics = {
+  links: [],
+  nodes: [],
+  indegree: {},
+  weightedIndegree: {},
+  reciprocity: {},
+  density: EMPTY_NETWORK_DENSITY,
 };
 
 /** Transforma participants + responses de Supabase al grafo ONA y ejecuta el motor matemático. */
@@ -135,13 +180,30 @@ function computeOnaClientMetrics(
   participants: Participant[],
   responses: Response[],
 ): OnaClientMetrics {
-  const links = buildGraphLinksFromResponses(participants, responses);
-  const nodes = buildGraphNodes(participants, links);
-  const indegree = calculateIndegree(links);
-  const reciprocity = calculateReciprocity(links);
-  const density = calculateNetworkDensity(participants.length, links);
+  try {
+    const safeParticipants = Array.isArray(participants) ? participants : [];
+    const safeResponses = Array.isArray(responses) ? responses : [];
+    const links = buildGraphLinksFromResponses(safeParticipants, safeResponses);
+    const nodes = buildGraphNodes(safeParticipants, links);
+    const indegree = calculateIndegree(links);
+    const weightedIndegree = calculateWeightedIndegree(links);
+    const reciprocity = calculateReciprocity(links);
+    const density =
+      calculateNetworkDensity(safeParticipants.length, links) ??
+      EMPTY_NETWORK_DENSITY;
 
-  return { links, nodes, indegree, reciprocity, density };
+    return {
+      links: Array.isArray(links) ? links : [],
+      nodes: Array.isArray(nodes) ? nodes : [],
+      indegree: indegree ?? {},
+      weightedIndegree: weightedIndegree ?? {},
+      reciprocity: reciprocity ?? {},
+      density,
+    };
+  } catch (error) {
+    console.error("[CLIENTE ONA] Error calculando métricas locales:", error);
+    return EMPTY_ONA_METRICS;
+  }
 }
 
 function logOnaClientMetrics(
@@ -150,6 +212,7 @@ function logOnaClientMetrics(
 ): void {
   console.log("[CLIENTE ONA]", source, {
     indegree: metrics.indegree,
+    weightedIndegree: metrics.weightedIndegree,
     reciprocity: metrics.reciprocity,
     density: metrics.density,
     linkCount: metrics.links.length,
@@ -310,11 +373,11 @@ function buildRanking(
 
 function resolveParticipantSiloLabel(
   participantId: string,
-  silos: NetworkSilo[],
+  silos: NetworkSilo[] | null | undefined,
 ): string {
   const normalizedId = normalizeParticipantId(participantId);
-  const silo = silos.find((candidate) =>
-    candidate.memberIds.some(
+  const silo = (silos ?? []).find((candidate) =>
+    (candidate?.memberIds ?? []).some(
       (memberId) => normalizeParticipantId(memberId) === normalizedId,
     ),
   );
@@ -323,7 +386,7 @@ function resolveParticipantSiloLabel(
     return "Sin silo aislado (integrado en la red general del equipo)";
   }
 
-  return `Silo ${silo.id.toUpperCase()} (${silo.size} miembros)`;
+  return `Silo ${(silo.id ?? "x").toUpperCase()} (${silo.size ?? silo.memberIds?.length ?? 0} miembros)`;
 }
 
 function resolveVoterName(
@@ -386,15 +449,20 @@ export default function ResultadosPage() {
   const [realGroupName, setRealGroupName] = useState<string | null>(null);
   const [realParticipants, setRealParticipants] = useState<Participant[]>([]);
   const [realResponses, setRealResponses] = useState<Response[]>([]);
+  /** Firma de hidratación: fuerza remount del SociogramGraph al llegar datos reales. */
+  const [graphHydrationKey, setGraphHydrationKey] = useState("empty");
   const [demoModeEnabled, setDemoModeEnabled] = useState(false);
   const [selectedDemoOrg, setSelectedDemoOrg] = useState<DemoOrgId>(
     "tech-solutions",
   );
   const [isLoading, setIsLoading] = useState(true);
   const [isSimulating, setIsSimulating] = useState(false);
-  const [generating, setGenerating] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
-  const [aiReport, setAiReport] = useState<any>(null);
+  /** Diagnóstico ElevateX (markdown) desde /api/ai-diagnosis. */
+  const [aiReport, setAiReport] = useState<string | null>(null);
+  const [isLoadingAi, setIsLoadingAi] = useState(false);
+  const [aiReportOpen, setAiReportOpen] = useState(true);
+  const [aiUsedFallback, setAiUsedFallback] = useState(false);
   const [aiInsight, setAiInsight] = useState<string | null>(null);
   const [isGeneratingInsight, setIsGeneratingInsight] = useState(false);
   const [selectedParticipant, setSelectedParticipant] =
@@ -405,6 +473,8 @@ export default function ResultadosPage() {
   const [importSuccessMessage, setImportSuccessMessage] = useState<string | null>(
     null,
   );
+  const [isSendingInvites, setIsSendingInvites] = useState(false);
+  const [sendingMessage, setSendingMessage] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<NetworkMetricsResult | null>(null);
   const [rpcMetrics, setRpcMetrics] = useState<
     Array<{
@@ -415,6 +485,9 @@ export default function ResultadosPage() {
   >([]);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [edtMetrics, setEdtMetrics] = useState<EdtMetricsResult | null>(null);
+  const [onaDiagnostics, setOnaDiagnostics] =
+    useState<ElevateXOnaDiagnostics | null>(null);
+  const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
 
   const supabase = useMemo(() => getSupabase(), []);
   const pdfExportRef = useRef<HTMLDivElement>(null);
@@ -437,26 +510,15 @@ export default function ResultadosPage() {
       setError(null);
     }
 
-    const [groupResult, participantsResult, responsesResult] =
-      await Promise.all([
-        supabase
-          .from("groups")
-          .select(GROUP_COLUMNS)
-          .eq("id", numericGroupId)
-          .maybeSingle(),
-        supabase
-          .from("participants")
-          .select("id, name, group_id")
-          .eq("group_id", numericGroupId),
-        supabase
-          .from("responses")
-          .select(RESPONSE_COLUMNS)
-          .eq("group_id", numericGroupId),
-      ]);
+    // Solo cabecera: el roster y las respuestas llegan vía elevatex-metrics
+    // (service role) para evitar bloqueos RLS en el cliente.
+    const groupResult = await supabase
+      .from("groups")
+      .select(GROUP_NAME_COLUMNS)
+      .eq("id", numericGroupId)
+      .maybeSingle<{ id: string | number; name: string | null }>();
 
     console.log("Datos devueltos (groups):", groupResult.data);
-    console.log("Datos devueltos (participants):", participantsResult.data);
-    console.log("Datos devueltos (responses):", responsesResult.data);
 
     if (groupResult.error || !groupResult.data) {
       if (IS_LOCAL_DEV) {
@@ -472,50 +534,11 @@ export default function ResultadosPage() {
         return;
       }
     } else {
-      setRealGroupName(groupResult.data.name);
-    }
-
-    if (participantsResult.error) {
-      if (IS_LOCAL_DEV) {
-        console.warn(
-          "[fetchGroupData] Dev bypass: error en participants —",
-          participantsResult.error.message,
-        );
-        setRealParticipants([]);
-      } else {
-        setError(participantsResult.error.message);
-        return;
-      }
-    } else {
-      setRealParticipants(participantsResult.data ?? []);
-    }
-
-    if (responsesResult.error) {
-      if (IS_LOCAL_DEV) {
-        console.warn(
-          "[fetchGroupData] Dev bypass: error en responses —",
-          responsesResult.error.message,
-        );
-        setRealResponses([]);
-      } else {
-        setError(responsesResult.error.message);
-        return;
-      }
-    } else {
-      setRealResponses(responsesResult.data ?? []);
-    }
-
-    const participantsList = participantsResult.error
-      ? []
-      : (participantsResult.data ?? []);
-    const responsesList = responsesResult.error
-      ? []
-      : (responsesResult.data ?? []);
-
-    if (participantsList.length > 0 || responsesList.length > 0) {
-      logOnaClientMetrics(
-        "fetchGroupData",
-        computeOnaClientMetrics(participantsList, responsesList),
+      setRealGroupName(
+        typeof groupResult.data.name === "string" &&
+          groupResult.data.name.trim().length > 0
+          ? groupResult.data.name.trim()
+          : `Equipo ${groupId}`,
       );
     }
 
@@ -530,192 +553,272 @@ export default function ResultadosPage() {
   );
 
   const fetchData = useCallback(async () => {
-    if (numericGroupId === null) {
+    if (numericGroupId === null || !groupId.trim()) {
       return;
     }
 
-    console.log("ID del grupo detectado en la URL:", numericGroupId);
+    setIsLoadingMetrics(true);
+    setMetricsError(null);
 
-    const loadMetricsForGroup = async (targetGroupId: number) => {
-      const [participantsResult, responsesResult] = await Promise.all([
-        supabase
-          .from("participants")
-          .select("id, name, group_id")
-          .eq("group_id", targetGroupId),
-        supabase
-          .from("responses")
-          .select(RESPONSE_COLUMNS)
-          .eq("group_id", targetGroupId),
-      ]);
-
-      console.log("Datos devueltos (participants):", participantsResult.data);
-      console.log("Datos devueltos (responses):", responsesResult.data);
-
-      if (participantsResult.error) {
-        if (IS_LOCAL_DEV) {
-          console.warn(
-            "[fetchData] Dev bypass: error en participants —",
-            participantsResult.error.message,
-          );
-          setMetrics(null);
-          setEdtMetrics(null);
-          setMetricsError(null);
-          return;
-        }
-
-        setMetricsError(participantsResult.error.message);
-        setMetrics(null);
-        setEdtMetrics(null);
-        return;
+    try {
+      let response: globalThis.Response;
+      try {
+        response = await fetch(
+          `/api/groups/${encodeURIComponent(groupId)}/elevatex-metrics`,
+          { cache: "no-store" },
+        );
+      } catch (networkError) {
+        throw new Error(
+          networkError instanceof Error
+            ? `No se pudo contactar con la API de métricas: ${networkError.message}`
+            : "No se pudo contactar con la API de métricas.",
+        );
       }
 
-      if (responsesResult.error) {
-        if (IS_LOCAL_DEV) {
-          console.warn(
-            "[fetchData] Dev bypass: error en responses —",
-            responsesResult.error.message,
-          );
-          setMetrics(null);
-          setEdtMetrics(null);
-          setMetricsError(null);
-          return;
-        }
+      let payload: {
+        success?: boolean;
+        error?: string;
+        details?: string;
+        groupName?: string;
+        edt?: EdtMetricsResult;
+        ona?: ElevateXOnaDiagnostics;
+        rawParticipants?: ElevateXRawParticipant[];
+        rawResponses?: ElevateXRawResponse[];
+      };
 
-        setMetricsError(responsesResult.error.message);
-        setMetrics(null);
-        setEdtMetrics(null);
-        return;
+      try {
+        payload = (await response.json()) as typeof payload;
+      } catch {
+        throw new Error(
+          `La API de métricas devolvió una respuesta no válida (HTTP ${response.status}).`,
+        );
       }
 
-      const participantsList = participantsResult.data ?? [];
-      const responsesList = responsesResult.data ?? [];
+      if (!response.ok || !payload.success || !payload.edt || !payload.ona) {
+        const message =
+          payload.error ??
+          `No se pudieron calcular las métricas del equipo (HTTP ${response.status}).`;
+        throw new Error(
+          payload.details ? `${message} (${payload.details})` : message,
+        );
+      }
 
-      logOnaClientMetrics(
-        "fetchData",
-        computeOnaClientMetrics(participantsList, responsesList),
-      );
+      const ona = payload.ona;
+      const rawParticipants = Array.isArray(payload.rawParticipants)
+        ? payload.rawParticipants
+        : [];
+      const rawResponses = Array.isArray(payload.rawResponses)
+        ? payload.rawResponses
+        : [];
 
-      const calculatedMetrics = calculateNetworkMetrics(
-        participantsList,
-        responsesList,
-      );
-      const calculatedEdtMetrics = computeEdtMetrics(
-        responsesList.map((response) => ({ answers: response.answers })),
-      );
+      console.log("[fetchData] Métricas servidor (EDT):", payload.edt);
+      console.log("[fetchData] Métricas servidor (ONA):", ona);
+      console.log("[fetchData] rawParticipants:", rawParticipants.length);
+      console.log("[fetchData] rawResponses:", rawResponses.length);
 
-      console.log("Datos devueltos (métricas ONA):", calculatedMetrics);
-      console.log("Datos devueltos (métricas EDT):", calculatedEdtMetrics);
-      setMetrics(calculatedMetrics);
-      setEdtMetrics(calculatedEdtMetrics);
-      setMetricsError(null);
+      const normalizedParticipants: Participant[] = rawParticipants.map(
+        (participant) => {
+          // Fallback seguro: columnas nuevas (email / survey_status) pueden
+          // no existir aún si la migración de BD está en curso.
+          const rawStatus =
+            participant != null &&
+            typeof participant === "object" &&
+            "survey_status" in participant
+              ? (participant as { survey_status?: unknown }).survey_status
+              : undefined;
+          const surveyStatus: Participant["survey_status"] =
+            rawStatus === "sent" ||
+            rawStatus === "completed" ||
+            rawStatus === "pending_send"
+              ? rawStatus
+              : "pending_send";
 
-      const { data, error: metricsRpcError } = await supabase.rpc(
-        "get_team_network_metrics",
-        {
-          target_group_id: targetGroupId,
+          const rawEmail =
+            participant != null &&
+            typeof participant === "object" &&
+            "email" in participant
+              ? (participant as { email?: unknown }).email
+              : undefined;
+          const email =
+            typeof rawEmail === "string" ? rawEmail.trim() : "";
+
+          return {
+            id: String(participant.id),
+            name:
+              typeof participant.name === "string" &&
+              participant.name.trim().length > 0
+                ? participant.name.trim()
+                : String(participant.id),
+            group_id: String(participant.group_id ?? groupId),
+            email,
+            survey_status: surveyStatus,
+          };
         },
       );
 
-      console.log("Datos devueltos (RPC):", data);
+      const normalizedResponses: Response[] = rawResponses.map(
+        (responseRow, index) => ({
+          id: String(responseRow.id ?? `response-${index}`),
+          group_id: String(responseRow.group_id ?? groupId),
+          participant_id:
+            responseRow.participant_id === null ||
+            responseRow.participant_id === undefined
+              ? null
+              : String(responseRow.participant_id),
+          respondent_name: responseRow.respondent_name ?? null,
+          answers: responseRow.answers,
+          started_at: responseRow.started_at ?? null,
+          completed_at: responseRow.completed_at ?? null,
+        }),
+      );
 
-      if (metricsRpcError) {
-        console.error(
-          "Error real de Supabase:",
-          JSON.stringify(metricsRpcError, null, 2),
-        );
-        setRpcMetrics([]);
-      } else {
-        setRpcMetrics(data || []);
+      const nextHydrationKey = [
+        "api",
+        groupId,
+        `p${normalizedParticipants.length}`,
+        `r${normalizedResponses.length}`,
+        normalizedParticipants.map((participant) => participant.id).join(","),
+        normalizedResponses
+          .map(
+            (responseRow) =>
+              `${responseRow.id}:${responseRow.participant_id ?? "null"}`,
+          )
+          .join(","),
+      ].join("|");
+
+      // Hidratación atómica del roster real → el grafo debe redibujar en el mismo commit.
+      setRealParticipants(normalizedParticipants);
+      setRealResponses(normalizedResponses);
+      setGraphHydrationKey(nextHydrationKey);
+
+      console.log("[fetchData] Hidratación React OK:", {
+        hydrationKey: nextHydrationKey,
+        realParticipants: normalizedParticipants.length,
+        realResponses: normalizedResponses.length,
+        sampleParticipant: normalizedParticipants[0] ?? null,
+        sampleResponse: normalizedResponses[0]
+          ? {
+              id: normalizedResponses[0].id,
+              participant_id: normalizedResponses[0].participant_id,
+              hasInfluencia:
+                !!normalizedResponses[0].answers &&
+                typeof normalizedResponses[0].answers === "object" &&
+                "influencia" in
+                  (normalizedResponses[0].answers as Record<string, unknown>),
+            }
+          : null,
+      });
+
+      if (
+        typeof payload.groupName === "string" &&
+        payload.groupName.trim().length > 0
+      ) {
+        setRealGroupName(payload.groupName.trim());
       }
-    };
 
-    try {
-      if (IS_LOCAL_DEV) {
+      if (
+        normalizedParticipants.length > 0 ||
+        normalizedResponses.length > 0
+      ) {
+        try {
+          logOnaClientMetrics(
+            "fetchData/raw",
+            computeOnaClientMetrics(
+              normalizedParticipants,
+              normalizedResponses,
+            ),
+          );
+        } catch (metricsLogError) {
+          console.warn(
+            "[fetchData] No se pudieron loguear métricas ONA locales:",
+            metricsLogError,
+          );
+        }
+      }
+
+      setEdtMetrics(payload.edt);
+      setOnaDiagnostics(ona);
+
+      try {
+        setMetrics({
+          participants: (ona.talento?.participants ?? []).map((participant) => ({
+            id: participant.id,
+            name: participant.name,
+            inDegree: participant.inDegree,
+            outDegree: participant.outDegree,
+            centralityIndex: participant.centralityIndex,
+          })),
+          team: {
+            nodeCount: ona.cultura?.networkDensity?.nodeCount ?? 0,
+            linkCount: ona.cultura?.networkDensity?.linkCount ?? 0,
+            maxPossibleLinks:
+              ona.cultura?.networkDensity?.maxPossibleLinks ?? 0,
+            density: ona.cultura?.networkDensity?.density ?? 0,
+            densityPercent: ona.cultura?.networkDensity?.densityPercent ?? 0,
+            reciprocity: ona.cultura?.reciprocityRatio ?? 0,
+            reciprocityPercent: ona.cultura?.reciprocityPercent ?? 0,
+            mutualLinkCount: ona.cultura?.mutualLinkCount ?? 0,
+          },
+        });
+
+        setRpcMetrics(
+          (ona.talento?.participants ?? []).map((participant) => ({
+            participant_name: participant.name,
+            indegree_count: participant.inDegree,
+            relative_centrality: participant.centralityIndex,
+          })),
+        );
+      } catch (mapError) {
         console.warn(
-          "[fetchData] Dev bypass: validación tenant omitida — tenant de pruebas:",
-          FALLBACK_TEST_TENANT_ID,
+          "[fetchData] Error mapeando paneles ONA — se continúa con EDT:",
+          mapError,
         );
-        setError(null);
-        setMetricsError(null);
-        await loadMetricsForGroup(numericGroupId);
-        return;
-      }
-
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError || !user) {
-        setError(TENANT_ACCESS_DENIED_MESSAGE);
-        setMetricsError(TENANT_ACCESS_DENIED_MESSAGE);
         setMetrics(null);
-        setEdtMetrics(null);
         setRpcMetrics([]);
-        return;
       }
 
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .select("tenant_id")
-        .eq("id", user.id)
-        .single();
+      setMetricsError(null);
+    } catch (err) {
+      console.error("[fetchData] Error cargando métricas del servidor:", err);
 
-      if (profileError || !profile?.tenant_id) {
-        console.error("[fetchData] Perfil sin tenant válido:", {
-          userId: user.id,
-          profileError,
-        });
-        setError(TENANT_ACCESS_DENIED_MESSAGE);
-        setMetricsError(TENANT_ACCESS_DENIED_MESSAGE);
-        setMetrics(null);
-        setEdtMetrics(null);
-        setRpcMetrics([]);
-        return;
-      }
+      const message =
+        err instanceof Error
+          ? err.message
+          : "No se pudieron cargar las métricas del equipo.";
 
-      const { data: groupRow, error: groupError } = await supabase
-        .from("groups")
-        .select("id, tenant_id")
-        .eq("id", numericGroupId)
-        .eq("tenant_id", profile.tenant_id)
-        .maybeSingle();
-
-      if (groupError || !groupRow) {
-        console.error("[fetchData] Acceso denegado al grupo:", {
-          groupId: numericGroupId,
-          tenantId: profile.tenant_id,
-          groupError,
-        });
-        setError(TENANT_ACCESS_DENIED_MESSAGE);
-        setMetricsError(TENANT_ACCESS_DENIED_MESSAGE);
-        setMetrics(null);
-        setEdtMetrics(null);
-        setRpcMetrics([]);
-        return;
-      }
-
-      await loadMetricsForGroup(numericGroupId);
-    } catch (err: any) {
-      console.error("Error inesperado:", err);
-
-      if (IS_LOCAL_DEV) {
-        console.warn("[fetchData] Dev bypass: error inesperado — sin bloqueo de UI.");
-        setMetricsError(null);
-        return;
-      }
-
-      setMetricsError(err.message || "Error");
+      // Evitar spinner infinito: vaciar roster y liberar estados de carga.
+      setRealParticipants([]);
+      setRealResponses([]);
+      setGraphHydrationKey(`error|${groupId}|${Date.now()}`);
       setMetrics(null);
       setEdtMetrics(null);
+      setOnaDiagnostics(null);
+      setRpcMetrics([]);
+      setMetricsError(message);
+      setError(message);
+      setIsLoading(false);
+      setIsLoadingMetrics(false);
+    } finally {
+      setIsLoadingMetrics(false);
     }
-  }, [numericGroupId, supabase]);
+  }, [groupId, numericGroupId]);
 
   const participants = demoModeEnabled
     ? demoDataset.participants
     : realParticipants;
 
   const responses = demoModeEnabled ? demoDataset.responses : realResponses;
+
+  const pendingInviteCount = useMemo(
+    () =>
+      realParticipants.filter(
+        (participant) =>
+          (participant.survey_status ?? "pending_send") === "pending_send" &&
+          typeof participant.email === "string" &&
+          participant.email.includes("@"),
+      ).length,
+    [realParticipants],
+  );
 
   const displayedEdtMetrics = useMemo(() => {
     if (edtMetrics && !demoModeEnabled) {
@@ -747,6 +850,10 @@ export default function ResultadosPage() {
     setIndividualInsight(null);
     if (enabled) {
       setImportSuccessMessage(null);
+      setOnaDiagnostics(null);
+      setGraphHydrationKey(`demo-${selectedDemoOrg}-${Date.now()}`);
+    } else {
+      setGraphHydrationKey(`live-${graphHydrationKey}-${Date.now()}`);
     }
   }
 
@@ -773,11 +880,11 @@ export default function ResultadosPage() {
         body: JSON.stringify({
           mode: "group",
           groupName: groupName ?? `Equipo ${groupId}`,
-          indegree: onaMetrics.indegree,
-          reciprocity: onaMetrics.reciprocity,
-          density: onaMetrics.density,
-          silos: networkSilos,
-          participants: participants.map((participant) => ({
+          indegree: onaMetrics?.indegree ?? {},
+          reciprocity: onaMetrics?.reciprocity ?? {},
+          density: onaMetrics?.density ?? EMPTY_NETWORK_DENSITY,
+          silos: networkSilos ?? [],
+          participants: (participants ?? []).map((participant) => ({
             id: String(participant.id),
             name: participant.name,
           })),
@@ -827,6 +934,9 @@ export default function ResultadosPage() {
     setDemoModeEnabled(false);
     setRealParticipants(persisted.participants);
     setRealResponses(persisted.responses);
+    setGraphHydrationKey(
+      `import|${groupId}|p${persisted.participants.length}|r${persisted.responses.length}|${Date.now()}`,
+    );
     setAiInsight(null);
     setError(null);
     setImportSuccessMessage(
@@ -863,17 +973,46 @@ export default function ResultadosPage() {
       return;
     }
 
+    if (numericGroupId === null) {
+      setError("El ID del equipo en la URL no es válido.");
+      return;
+    }
+
     setIsSimulating(true);
     setError(null);
 
     try {
-      const result = await simulateDevVotesForGroup(getSupabase(), groupId);
+      const response = await fetch(
+        `${window.location.origin}/api/dev/simulate-votes`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({ groupId: String(numericGroupId) }),
+        },
+      );
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        participantCount?: number;
+        responseCount?: number;
+        surveyId?: string;
+      };
+
+      if (!response.ok || !payload.success) {
+        throw new Error(
+          payload.error ?? "No se pudieron simular los votos de prueba.",
+        );
+      }
+
+      const result = payload;
 
       setDemoModeEnabled(false);
       setAiReport(null);
       setAiInsight(null);
       setImportSuccessMessage(
-        `${result.responseCount} respuestas simuladas insertadas (${result.participantCount} colaboradores ficticios · survey ${result.surveyId.slice(0, 8)}…).`,
+        `${result.responseCount} respuestas simuladas insertadas (${result.participantCount} colaboradores ficticios · survey ${result.surveyId?.slice(0, 8)}…).`,
       );
 
       await Promise.all([fetchGroupData(), fetchData()]);
@@ -890,6 +1029,66 @@ export default function ResultadosPage() {
     }
   }
 
+  const handleSendInvites = useCallback(async () => {
+    if (isSendingInvites || demoModeEnabled || !groupId.trim()) {
+      return;
+    }
+
+    setIsSendingInvites(true);
+    setSendingMessage(null);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/groups/${encodeURIComponent(groupId)}/send-invites`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+        },
+      );
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        message?: string;
+        sent?: number;
+        simulated?: number;
+      };
+
+      if (!response.ok || !payload.success) {
+        throw new Error(
+          payload.error ?? "No se pudieron enviar las invitaciones.",
+        );
+      }
+
+      const successText =
+        typeof payload.message === "string" && payload.message.trim().length > 0
+          ? payload.message.trim()
+          : `Invitaciones despachadas: ${payload.sent ?? 0} enviadas, ${payload.simulated ?? 0} simuladas.`;
+
+      setImportSuccessMessage(successText);
+      setSendingMessage(successText);
+      await Promise.all([fetchGroupData(), fetchData()]);
+    } catch (err) {
+      console.error("[resultados] Error enviando invitaciones:", err);
+      setSendingMessage(null);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "No se pudieron enviar las invitaciones.",
+      );
+    } finally {
+      setIsSendingInvites(false);
+    }
+  }, [
+    isSendingInvites,
+    demoModeEnabled,
+    groupId,
+    fetchGroupData,
+    fetchData,
+  ]);
+
   const participantNameLookup = useMemo(
     () => buildParticipantNameLookup(participants),
     [participants],
@@ -898,7 +1097,14 @@ export default function ResultadosPage() {
   const nameById = participantNameLookup.nameById;
 
   const ranking = useMemo(
-    () => buildRanking(participants, responses),
+    () => {
+      try {
+        return buildRanking(participants ?? [], responses ?? []) ?? [];
+      } catch (error) {
+        console.error("[CLIENTE ONA] Error en ranking:", error);
+        return [];
+      }
+    },
     [participants, responses],
   );
 
@@ -907,58 +1113,316 @@ export default function ResultadosPage() {
     [responses, participantNameLookup],
   );
 
-  const onaMetrics = useMemo(
-    () => computeOnaClientMetrics(participants, responses),
-    [participants, responses],
-  );
+  const onaMetrics = useMemo((): OnaClientMetrics => {
+    try {
+      const clientGraph = computeOnaClientMetrics(participants, responses);
 
-  const graphLinks = onaMetrics.links;
-  const indegreeMap = onaMetrics.indegree;
-  const networkDensity = onaMetrics.density;
+      if (demoModeEnabled || !onaDiagnostics) {
+        return {
+          ...clientGraph,
+          links: Array.isArray(clientGraph.links) ? clientGraph.links : [],
+          nodes: Array.isArray(clientGraph.nodes) ? clientGraph.nodes : [],
+          indegree: clientGraph.indegree ?? {},
+          weightedIndegree: clientGraph.weightedIndegree ?? {},
+          reciprocity: clientGraph.reciprocity ?? {},
+          density: clientGraph.density ?? EMPTY_NETWORK_DENSITY,
+        };
+      }
+
+      const indegree: Record<string, number> = {};
+      const serverParticipants = Array.isArray(
+        onaDiagnostics.talento?.participants,
+      )
+        ? onaDiagnostics.talento.participants
+        : [];
+
+      for (const participant of serverParticipants) {
+        if (participant?.id) {
+          indegree[participant.id] = participant.inDegree ?? 0;
+        }
+      }
+
+      return {
+        links: Array.isArray(clientGraph.links) ? clientGraph.links : [],
+        nodes: Array.isArray(clientGraph.nodes) ? clientGraph.nodes : [],
+        indegree:
+          Object.keys(indegree).length > 0
+            ? indegree
+            : (clientGraph.indegree ?? {}),
+        weightedIndegree: clientGraph.weightedIndegree ?? {},
+        reciprocity: clientGraph.reciprocity ?? {},
+        density:
+          onaDiagnostics.cultura?.networkDensity ??
+          clientGraph.density ??
+          EMPTY_NETWORK_DENSITY,
+      };
+    } catch (error) {
+      console.error("[CLIENTE ONA] Error ensamblando onaMetrics:", error);
+      return EMPTY_ONA_METRICS;
+    }
+  }, [demoModeEnabled, onaDiagnostics, participants, responses]);
+
+  /** KPIs ONA del motor puro (`calculateNetworkMetrics`) sobre respuestas hidratadas. */
+  const calculatedNetworkMetrics = useMemo((): CalculatedNetworkMetrics => {
+    try {
+      return calculateNetworkMetrics(
+        (participants ?? []).map((participant) => ({
+          id: participant.id,
+          name: participant.name,
+        })),
+        (responses ?? [])
+          .filter(
+            (response) =>
+              response.participant_id !== null &&
+              response.participant_id !== undefined,
+          )
+          .map((response) => ({
+            participant_id: response.participant_id as string,
+            answers: response.answers,
+          })),
+      );
+    } catch (error) {
+      console.error("[resultados] Error en calculateNetworkMetrics:", error);
+      return {
+        density: 0,
+        inDegree: {},
+        outDegree: {},
+        reciprocityRate: 0,
+        isolatedParticipants: [],
+        topInfluencers: [],
+      };
+    }
+  }, [participants, responses]);
+
+  useEffect(() => {
+    console.log("[resultados] KPIs ONA (mathEngine.calculateNetworkMetrics):", {
+      density: calculatedNetworkMetrics.density,
+      reciprocityRate: calculatedNetworkMetrics.reciprocityRate,
+      inDegree: calculatedNetworkMetrics.inDegree,
+      outDegree: calculatedNetworkMetrics.outDegree,
+      isolatedParticipants: calculatedNetworkMetrics.isolatedParticipants,
+      topInfluencers: calculatedNetworkMetrics.topInfluencers,
+      rosterSize: participants?.length ?? 0,
+      responseCount: responses?.length ?? 0,
+    });
+  }, [calculatedNetworkMetrics, participants?.length, responses?.length]);
+
+  const graphLinks = Array.isArray(onaMetrics?.links) ? onaMetrics.links : [];
+  const indegreeMap = onaMetrics?.indegree ?? {};
+  const weightedIndegreeMap = onaMetrics?.weightedIndegree ?? {};
+  const networkDensity =
+    onaMetrics?.density ?? EMPTY_NETWORK_DENSITY;
+
+  const individualReciprocityPercentMap = useMemo(() => {
+    try {
+      const fromServer =
+        onaDiagnostics?.cultura?.individualReciprocityPercent ?? null;
+      if (fromServer && Object.keys(fromServer).length > 0) {
+        return fromServer;
+      }
+
+      const participantIds = (participants ?? []).map((participant) =>
+        normalizeParticipantId(String(participant.id)),
+      );
+      return (
+        calculateNetworkReciprocity(graphLinks, participantIds)
+          .individualReciprocityPercent ?? {}
+      );
+    } catch (error) {
+      console.error(
+        "[CLIENTE ONA] Error calculando reciprocidad individual:",
+        error,
+      );
+      return {};
+    }
+  }, [
+    graphLinks,
+    onaDiagnostics?.cultura?.individualReciprocityPercent,
+    participants,
+  ]);
+
+  const onaUtilsNetworkDensity = useMemo(() => {
+    try {
+      return (
+        calculateOnaNetworkDensity({
+          participants: (participants ?? []).map((participant) => ({
+            id: String(participant.id),
+            name: participant.name,
+          })),
+          votes: (responses ?? [])
+            .filter(
+              (response) =>
+                response.participant_id !== null &&
+                response.participant_id !== undefined,
+            )
+            .map((response) => ({
+              voterId: String(response.participant_id),
+              nomineeIds: parseResponseAnswers(response.answers),
+            })),
+        }) ?? {
+          nodeCount: 0,
+          arcCount: 0,
+          maxPossibleArcs: 0,
+          density: 0,
+          densityPercent: 0,
+        }
+      );
+    } catch (error) {
+      console.error("[CLIENTE ONA] Error en onaUtilsNetworkDensity:", error);
+      return {
+        nodeCount: 0,
+        arcCount: 0,
+        maxPossibleArcs: 0,
+        density: 0,
+        densityPercent: 0,
+      };
+    }
+  }, [participants, responses]);
+
+  const culturaMetrics = demoModeEnabled ? null : onaDiagnostics?.cultura ?? null;
+  const direccionMetrics = demoModeEnabled
+    ? null
+    : onaDiagnostics?.direccion ?? null;
+  const talentoMetrics = demoModeEnabled ? null : onaDiagnostics?.talento ?? null;
 
   const averageResponseTime = useMemo(
-    () => calculateAverageResponseTime(responses),
+    () => calculateAverageResponseTime(responses ?? []),
     [responses],
   );
 
   useEffect(() => {
-    if (participants.length === 0 && responses.length === 0) {
+    if ((participants?.length ?? 0) === 0 && (responses?.length ?? 0) === 0) {
       return;
     }
 
     console.log("[CLIENTE ONA]", {
-      indegree: onaMetrics.indegree,
-      reciprocity: onaMetrics.reciprocity,
-      density: onaMetrics.density,
-      nodes: onaMetrics.nodes,
-      links: onaMetrics.links,
+      indegree: onaMetrics?.indegree ?? {},
+      weightedIndegree: onaMetrics?.weightedIndegree ?? {},
+      reciprocity: onaMetrics?.reciprocity ?? {},
+      density: onaMetrics?.density ?? EMPTY_NETWORK_DENSITY,
+      nodes: onaMetrics?.nodes ?? [],
+      links: onaMetrics?.links ?? [],
     });
-  }, [onaMetrics, participants.length, responses.length]);
+  }, [onaMetrics, participants?.length, responses?.length]);
 
-  const affinityGraphData = useMemo(
-    () => buildEdtAffinityGraphData(participants, responses),
-    [participants, responses],
+  const onaGraphData = useMemo(
+    () => ({
+      nodes: Array.isArray(onaMetrics?.nodes) ? [...onaMetrics.nodes] : [],
+      links: Array.isArray(graphLinks) ? [...graphLinks] : [],
+    }),
+    [onaMetrics?.nodes, graphLinks, graphHydrationKey],
   );
 
-  const influenceLeaders = useMemo(
-    () => buildInfluenceLeaders(graphLinks, nameById),
-    [graphLinks, nameById],
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") {
+      return;
+    }
+
+    console.log("[resultados] onaGraphData → SociogramGraph:", {
+      nodes: onaGraphData.nodes.length,
+      links: onaGraphData.links.length,
+      hasOnaGraphData:
+        onaGraphData.nodes.length > 0 || onaGraphData.links.length > 0,
+    });
+  }, [onaGraphData]);
+
+  const sociogramInstanceKey = useMemo(() => {
+    if (demoModeEnabled) {
+      return `demo-${selectedDemoOrg}-p${participants.length}-r${responses.length}-l${graphLinks.length}`;
+    }
+
+    return `ona-${graphHydrationKey}-n${onaGraphData.nodes.length}-l${onaGraphData.links.length}`;
+  }, [
+    demoModeEnabled,
+    selectedDemoOrg,
+    participants.length,
+    responses.length,
+    graphLinks.length,
+    graphHydrationKey,
+    onaGraphData.nodes.length,
+    onaGraphData.links.length,
+  ]);
+
+  const hasHydratedRoster =
+    (realParticipants?.length ?? 0) > 0 || (realResponses?.length ?? 0) > 0;
+
+  const influenceLeaders = useMemo((): InfluenceLeader[] => {
+    try {
+      if (talentoMetrics) {
+        const leaders = Array.isArray(talentoMetrics.informalLeaders)
+          ? talentoMetrics.informalLeaders
+          : [];
+        return leaders.map((leader) => ({
+          id: leader.id,
+          name: leader.name,
+          votes: leader.inDegree ?? 0,
+        }));
+      }
+
+      return buildInfluenceLeaders(graphLinks, nameById) ?? [];
+    } catch (error) {
+      console.error("[CLIENTE ONA] Error en influenceLeaders:", error);
+      return [];
+    }
+  }, [talentoMetrics, graphLinks, nameById]);
+
+  const reciprocityLeaders = useMemo((): ReciprocityLeader[] => {
+    try {
+      return buildReciprocityLeaders(graphLinks, nameById) ?? [];
+    } catch (error) {
+      console.error("[CLIENTE ONA] Error en reciprocityLeaders:", error);
+      return [];
+    }
+  }, [graphLinks, nameById]);
+
+  const isolatedParticipants = useMemo(() => {
+    try {
+      if (talentoMetrics) {
+        return Array.isArray(talentoMetrics.isolatedParticipants)
+          ? talentoMetrics.isolatedParticipants
+          : [];
+      }
+
+      return calculateIsolation(participants ?? [], indegreeMap) ?? [];
+    } catch (error) {
+      console.error("[CLIENTE ONA] Error en isolatedParticipants:", error);
+      return [];
+    }
+  }, [talentoMetrics, participants, indegreeMap]);
+
+  const saturatedParticipants = useMemo(
+    () =>
+      Array.isArray(talentoMetrics?.saturatedParticipants)
+        ? talentoMetrics.saturatedParticipants
+        : [],
+    [talentoMetrics],
   );
 
-  const reciprocityLeaders = useMemo(
-    () => buildReciprocityLeaders(graphLinks, nameById),
-    [graphLinks, nameById],
-  );
+  const networkSilos = useMemo((): NetworkSilo[] => {
+    try {
+      if (direccionMetrics) {
+        return Array.isArray(direccionMetrics.silos)
+          ? direccionMetrics.silos
+          : [];
+      }
 
-  const isolatedParticipants = useMemo(
-    () => calculateIsolation(participants, indegreeMap),
-    [participants, indegreeMap],
-  );
+      return detectNetworkSilos(participants ?? [], graphLinks) ?? [];
+    } catch (error) {
+      console.error("[CLIENTE ONA] Error en networkSilos:", error);
+      return [];
+    }
+  }, [direccionMetrics, participants, graphLinks]);
 
-  const networkSilos = useMemo(
-    () => detectNetworkSilos(participants, graphLinks),
-    [participants, graphLinks],
-  );
+  const hasOnaGraphData =
+    (onaGraphData.nodes?.length ?? 0) > 0 ||
+    (onaGraphData.links?.length ?? 0) > 0;
+  const hasRankingData = Array.isArray(ranking) && ranking.length > 0;
+  /** No ocultar el mapa si ya hidratamos roster real (evita unmount del canvas). */
+  const showMapSkeleton =
+    !demoModeEnabled &&
+    !hasOnaGraphData &&
+    !hasHydratedRoster &&
+    (isLoadingMetrics || isLoading);
 
   const participantsWithResponses = useMemo(() => {
     const ids = new Set<string>();
@@ -976,6 +1440,62 @@ export default function ResultadosPage() {
     setIsGeneratingIndividual(false);
   }
 
+  function buildSelectedParticipantProfile(
+    participantId: string,
+    participantName: string,
+  ): SelectedParticipantProfile {
+    const normalizedParticipantId = normalizeParticipantId(participantId);
+    const teamOnaMetrics = computeOnaClientMetrics(participants, responses);
+    const indegree =
+      teamOnaMetrics?.indegree?.[normalizedParticipantId] ??
+      indegreeMap?.[normalizedParticipantId] ??
+      0;
+    const weightedIndegree =
+      teamOnaMetrics?.weightedIndegree?.[normalizedParticipantId] ??
+      weightedIndegreeMap?.[normalizedParticipantId] ??
+      0;
+    const reciprocity =
+      teamOnaMetrics?.reciprocity?.[normalizedParticipantId] ?? 0;
+    const reciprocityPercent =
+      individualReciprocityPercentMap?.[normalizedParticipantId] ??
+      culturaMetrics?.individualReciprocityPercent?.[normalizedParticipantId] ??
+      0;
+    const silo = resolveParticipantSiloLabel(
+      participantId,
+      networkSilos ?? [],
+    );
+
+    return {
+      id: participantId,
+      name: participantName,
+      indegree,
+      weightedIndegree:
+        Math.round((Number(weightedIndegree) || 0) * 1000) / 1000,
+      reciprocity,
+      reciprocityPercent: Math.round(Number(reciprocityPercent) || 0),
+      silo,
+    };
+  }
+
+  function handleSociogramNodeClick(node: SociogramNode) {
+    const participantId = String(node?.id ?? "").trim();
+    if (!participantId) {
+      return;
+    }
+
+    const profile = buildSelectedParticipantProfile(
+      participantId,
+      typeof node.name === "string" && node.name.trim().length > 0
+        ? node.name.trim()
+        : participantId,
+    );
+
+    setSelectedParticipant(profile);
+    setIndividualInsight(null);
+    setIsGeneratingIndividual(false);
+    setError(null);
+  }
+
   async function handleGenerateIndividualInsight(entry: RankingEntry) {
     if (isGeneratingIndividual) {
       return;
@@ -990,30 +1510,13 @@ export default function ResultadosPage() {
     const participantId = entry.id;
     const normalizedParticipantId = normalizeParticipantId(participantId);
     const teamOnaMetrics = computeOnaClientMetrics(participants, responses);
-    const participantIndegree =
-      teamOnaMetrics.indegree[normalizedParticipantId] ??
-      indegreeMap[normalizedParticipantId] ??
-      entry.votes;
-    const participantReciprocity =
-      teamOnaMetrics.reciprocity[normalizedParticipantId] ?? 0;
-    const participantSilo = resolveParticipantSiloLabel(
-      participantId,
-      networkSilos,
-    );
-    const participantResponse = responses.find(
+    const profile = buildSelectedParticipantProfile(entry.id, entry.name);
+    const participantResponse = (responses ?? []).find(
       (response) =>
         response.participant_id !== null &&
         normalizeParticipantId(String(response.participant_id)) ===
           normalizedParticipantId,
     );
-
-    const profile: SelectedParticipantProfile = {
-      id: participantId,
-      name: entry.name,
-      indegree: participantIndegree,
-      reciprocity: participantReciprocity,
-      silo: participantSilo,
-    };
 
     setSelectedParticipant(profile);
     setIndividualInsight(null);
@@ -1034,13 +1537,16 @@ export default function ResultadosPage() {
           participantIndegree: profile.indegree,
           participantReciprocity: profile.reciprocity,
           participantSilo: profile.silo,
-          networkDensityPercent: teamOnaMetrics.density.densityPercent,
-          density: teamOnaMetrics.density,
-          participants: participants.map((participant) => ({
+          networkDensityPercent:
+            teamOnaMetrics?.density?.densityPercent ??
+            networkDensity?.densityPercent ??
+            0,
+          density: teamOnaMetrics?.density ?? EMPTY_NETWORK_DENSITY,
+          participants: (participants ?? []).map((participant) => ({
             id: String(participant.id),
             name: participant.name,
           })),
-          responses: responses.map((response) => ({
+          responses: (responses ?? []).map((response) => ({
             participant_id: response.participant_id,
             answers: response.answers,
           })),
@@ -1068,56 +1574,139 @@ export default function ResultadosPage() {
     }
   }
 
-  async function handleGenerateReport() {
-    if (generating) {
+  async function handleGenerateAiDiagnosis() {
+    if (isLoadingAi) {
       return;
     }
 
-    setGenerating(true);
+    if (!groupId.trim()) {
+      setError("No se pudo resolver el ID del equipo para el diagnóstico IA.");
+      return;
+    }
+
+    setIsLoadingAi(true);
     setError(null);
+    setAiReportOpen(true);
 
     try {
-      const response = await fetch("/api/generate-report", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          groupName: groupName ?? "Equipo",
-          edt: {
-            entornoMedia: displayedEdtMetrics.entornoMedia,
-            direccionMedia: displayedEdtMetrics.direccionMedia,
-            talentoMedia: displayedEdtMetrics.talentoMedia,
-            transversalMedia: displayedEdtMetrics.transversalMedia,
-            mediaGlobalSistema: displayedEdtMetrics.mediaGlobalSistema,
-          },
-          ona: {
-            density:
-              metrics?.team.densityPercent ?? networkDensity.densityPercent,
-            leaders: influenceLeaders.map((leader) => leader.name),
-            isolated: isolatedParticipants.map(
-              (participant) => participant.name,
+      let response: globalThis.Response;
+      try {
+        response = await fetch("/api/ai-diagnosis", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({
+            teamName: groupName ?? `Equipo ${groupId}`,
+            density: calculatedNetworkMetrics.density,
+            reciprocityRate: calculatedNetworkMetrics.reciprocityRate,
+            isolatedParticipants:
+              calculatedNetworkMetrics.isolatedParticipants.map(
+                (participant) => ({
+                  id: participant.id,
+                  name: participant.name,
+                }),
+              ),
+            topInfluencers: calculatedNetworkMetrics.topInfluencers.map(
+              (influencer) => ({
+                id: influencer.id,
+                name: influencer.name,
+                inDegree: influencer.inDegree,
+              }),
             ),
-            silosCount: networkSilos.length,
-          },
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error ?? "Error al generar el informe IA");
+            rosterSize: participants?.length ?? 0,
+            // Contexto legacy opcional (compatibilidad del endpoint).
+            leaders: calculatedNetworkMetrics.topInfluencers.map(
+              (influencer) => ({
+                id: influencer.id,
+                name: influencer.name,
+                nominationsReceived: influencer.inDegree,
+                votes: influencer.inDegree,
+              }),
+            ),
+            fragmentation: {
+              index: Math.min(
+                1,
+                (calculatedNetworkMetrics.isolatedParticipants.length || 0) /
+                  Math.max(participants?.length ?? 1, 1),
+              ),
+              siloCount: networkSilos?.length ?? 0,
+            },
+          }),
+        });
+      } catch (networkError) {
+        throw new Error(
+          networkError instanceof Error
+            ? `No se pudo contactar con ai-diagnosis: ${networkError.message}`
+            : "No se pudo contactar con ai-diagnosis.",
+        );
       }
 
-      setAiReport(data);
+      let data: {
+        success?: boolean;
+        error?: string;
+        diagnosis?: string;
+        usedFallback?: boolean;
+        model?: string | null;
+      };
+
+      try {
+        data = (await response.json()) as typeof data;
+      } catch {
+        throw new Error(
+          `ai-diagnosis devolvió una respuesta no válida (HTTP ${response.status}).`,
+        );
+      }
+
+      if (!response.ok || !data.success) {
+        throw new Error(
+          data.error ??
+            `No se pudo generar el diagnóstico IA del equipo (HTTP ${response.status}).`,
+        );
+      }
+
+      const diagnosisText =
+        typeof data.diagnosis === "string" && data.diagnosis.trim().length > 0
+          ? data.diagnosis.trim()
+          : null;
+
+      if (!diagnosisText) {
+        throw new Error(
+          "El endpoint de diagnóstico IA devolvió una respuesta vacía.",
+        );
+      }
+
+      setAiReport(diagnosisText);
+      setAiUsedFallback(Boolean(data.usedFallback));
+      setAiReportOpen(true);
+
+      console.log("[ai-diagnosis] Informe generado:", {
+        model: data.model,
+        usedFallback: data.usedFallback ?? false,
+        chars: diagnosisText.length,
+        metrics: {
+          density: calculatedNetworkMetrics.density,
+          reciprocityRate: calculatedNetworkMetrics.reciprocityRate,
+          isolated: calculatedNetworkMetrics.isolatedParticipants.length,
+          topInfluencers: calculatedNetworkMetrics.topInfluencers.length,
+        },
+      });
     } catch (err) {
-      console.error("[resultados] Error generando informe IA:", err);
+      console.error("[resultados] Error en handleGenerateAiDiagnosis:", err);
+      setAiReport(null);
+      setAiUsedFallback(false);
       setError(
-        err instanceof Error ? err.message : "Error al generar el informe IA",
+        err instanceof Error
+          ? err.message
+          : "Error al generar el diagnóstico IA.",
       );
     } finally {
-      setGenerating(false);
+      setIsLoadingAi(false);
     }
+  }
+
+  /** Alias conservado por compatibilidad con handlers legacy. */
+  async function handleGenerateReport() {
+    await handleGenerateAiDiagnosis();
   }
 
   async function handleDownloadPDF() {
@@ -1180,7 +1769,7 @@ export default function ResultadosPage() {
     }
   }
 
-  const maxVotes = ranking[0]?.votes ?? 0;
+  const maxVotes = ranking?.[0]?.votes ?? 0;
 
   return (
     <div className="min-h-full bg-slate-50 print:bg-white">
@@ -1223,32 +1812,20 @@ export default function ResultadosPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={handleGenerateOnaInsight}
-                    disabled={isGeneratingInsight || participants.length === 0}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-800 shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-100 active:bg-indigo-200 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isGeneratingInsight ? (
-                      <>
-                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-700" />
-                        Generando diagnóstico...
-                      </>
-                    ) : (
-                      "Generar Diagnóstico IA"
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleGenerateReport}
-                    disabled={generating}
+                    onClick={handleGenerateAiDiagnosis}
+                    disabled={
+                      isLoadingAi ||
+                      (!demoModeEnabled && participants.length === 0)
+                    }
                     className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-violet-500 active:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {generating ? (
+                    {isLoadingAi ? (
                       <>
                         <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                        Analizando datos con IA...
+                        Analizando dinámicas de red con IA...
                       </>
                     ) : (
-                      "Generar Informe IA ✨"
+                      "✨ Generar Diagnóstico con IA"
                     )}
                   </button>
                   {!demoModeEnabled && (
@@ -1285,12 +1862,17 @@ export default function ResultadosPage() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-8 px-6 py-10 print:space-y-6 print:py-6">
-        {error &&
-          !(IS_LOCAL_DEV && error === TENANT_ACCESS_DENIED_MESSAGE) && (
+        {error ? (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 print:hidden">
             {error}
           </div>
-        )}
+        ) : null}
+
+        {metricsError && !demoModeEnabled && metricsError !== error ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 print:hidden">
+            {metricsError}
+          </div>
+        ) : null}
 
         {aiInsight && (
           <section className="overflow-hidden rounded-xl border border-indigo-200 bg-white shadow-sm print:border-slate-200 print:shadow-none">
@@ -1334,6 +1916,128 @@ export default function ResultadosPage() {
           </div>
         </section>
 
+        <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm print:hidden">
+          <div className="flex flex-col gap-4 border-b border-slate-200 px-6 py-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold text-slate-900">
+                Control de Convocatoria y Enlaces Mágicos
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Gestiona el envío de invitaciones personalizadas por correo
+                electrónico y monitoriza la participación en tiempo real.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleSendInvites()}
+              disabled={
+                isSendingInvites ||
+                demoModeEnabled ||
+                pendingInviteCount === 0 ||
+                !groupId.trim()
+              }
+              className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-violet-500 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_0_18px_rgba(139,92,246,0.28)] transition-all hover:from-violet-500 hover:to-violet-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isSendingInvites ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  Despachando correos...
+                </>
+              ) : (
+                "Enviar Invitaciones Pendientes (Resend)"
+              )}
+            </button>
+          </div>
+
+          <div className="space-y-4 p-6">
+            {sendingMessage ? (
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                {sendingMessage}
+              </div>
+            ) : null}
+
+            <div className="overflow-x-auto rounded-xl border border-slate-200">
+              <table className="min-w-full divide-y divide-slate-200">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th
+                      scope="col"
+                      className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500"
+                    >
+                      Colaborador
+                    </th>
+                    <th
+                      scope="col"
+                      className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500"
+                    >
+                      Correo Electrónico
+                    </th>
+                    <th
+                      scope="col"
+                      className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500"
+                    >
+                      Estado del Test
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 bg-white">
+                  {realParticipants.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={3}
+                        className="px-5 py-10 text-center text-sm text-slate-500"
+                      >
+                        Aún no hay colaboradores en este equipo.
+                      </td>
+                    </tr>
+                  ) : (
+                    realParticipants.map((participant) => {
+                      const status =
+                        participant.survey_status ?? "pending_send";
+
+                      return (
+                        <tr
+                          key={participant.id}
+                          className="hover:bg-slate-50/80"
+                        >
+                          <td className="whitespace-nowrap px-5 py-3.5 text-sm font-medium text-slate-900">
+                            {participant.name}
+                          </td>
+                          <td className="whitespace-nowrap px-5 py-3.5 text-sm text-slate-600">
+                            {participant.email?.trim() || "Sin correo"}
+                          </td>
+                          <td className="whitespace-nowrap px-5 py-3.5">
+                            {status === "completed" ? (
+                              <span
+                                className="inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold"
+                                style={{
+                                  color: "#10B981",
+                                  borderColor: "rgba(16, 185, 129, 0.35)",
+                                  backgroundColor: "rgba(16, 185, 129, 0.12)",
+                                }}
+                              >
+                                Completado
+                              </span>
+                            ) : status === "sent" ? (
+                              <span className="inline-flex rounded-full border border-amber-400/40 bg-sky-500/10 px-2.5 py-1 text-xs font-semibold text-sky-800">
+                                Enviado / Pendiente de Voto
+                              </span>
+                            ) : (
+                              <span className="inline-flex rounded-full border border-slate-300 bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                                Sin enviar
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <div
           ref={pdfExportRef}
           id={RESULTADOS_PDF_EXPORT_ID}
@@ -1353,24 +2057,196 @@ export default function ResultadosPage() {
 
         <EdtExecutiveDashboard metrics={displayedEdtMetrics} />
 
-        <section className="overflow-hidden rounded-xl border border-violet-500/40 bg-slate-900 shadow-[0_0_24px_rgba(139,92,246,0.15)]">
+        {isLoadingAi || aiReport ? (
+          <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <button
+              type="button"
+              onClick={() => setAiReportOpen((open) => !open)}
+              className="flex w-full items-center justify-between gap-4 border-b border-slate-200 bg-slate-50 px-6 py-4 text-left transition-colors hover:bg-slate-100"
+              aria-expanded={aiReportOpen}
+            >
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-lg font-semibold text-slate-900">
+                    Informe Ejecutivo de Clima y Red
+                  </h2>
+                  {isLoadingAi ? (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-0.5 text-xs font-medium text-violet-700">
+                      <span className="h-3 w-3 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
+                      Generando…
+                    </span>
+                  ) : null}
+                  {aiUsedFallback && !isLoadingAi ? (
+                    <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800">
+                      Modo prueba (sin OpenAI)
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-sm text-slate-500">
+                  Diagnóstico corporativo a partir de densidad, reciprocidad,
+                  aislados e influencers del motor ONA.
+                </p>
+              </div>
+              <span className="shrink-0 text-sm font-medium text-slate-500">
+                {aiReportOpen ? "Ocultar" : "Mostrar"}
+              </span>
+            </button>
+
+            {aiReportOpen ? (
+              <div className="p-6">
+                {isLoadingAi ? (
+                  <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-6">
+                    <div className="flex items-center gap-3 text-sm font-medium text-slate-700">
+                      <span className="h-5 w-5 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
+                      Analizando dinámicas de red con IA...
+                    </div>
+                    <div className="space-y-3" aria-hidden="true">
+                      <div className="h-4 w-2/5 animate-pulse rounded bg-slate-200" />
+                      <div className="h-3 w-full animate-pulse rounded bg-slate-200" />
+                      <div className="h-3 w-11/12 animate-pulse rounded bg-slate-200" />
+                      <div className="h-3 w-4/5 animate-pulse rounded bg-slate-200" />
+                      <div className="mt-4 h-4 w-1/3 animate-pulse rounded bg-slate-200" />
+                      <div className="h-3 w-full animate-pulse rounded bg-slate-200" />
+                      <div className="h-3 w-10/12 animate-pulse rounded bg-slate-200" />
+                    </div>
+                  </div>
+                ) : aiReport ? (
+                  <article className="rounded-xl border border-slate-200 bg-white p-5">
+                    <div className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
+                      {aiReport}
+                    </div>
+                  </article>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        <section className="rounded-xl border border-violet-500/40 bg-slate-900 shadow-[0_0_24px_rgba(139,92,246,0.15)]">
           <div className="border-b border-violet-500/30 px-6 py-4">
             <h2 className="text-lg font-semibold text-white">
               Mapa de Conexiones del Equipo
             </h2>
             <p className="mt-1 text-sm text-slate-400">
-              Visualización interactiva de afinidad EDT entre colaboradores
-              (coincidencias A–D en preguntas 1–28, umbral ≥ 18).
+              Visualización interactiva de la red de influencia y colaboración
+              real del equipo (Nombramientos ONA)
             </p>
           </div>
 
           <div className="p-6">
-            {isLoading && !demoModeEnabled ? (
-              <div className="flex h-[480px] items-center justify-center rounded-xl bg-slate-950 text-sm text-slate-400">
-                Cargando mapa de conexiones…
+            {showMapSkeleton ? (
+              <div className="flex h-[480px] flex-col items-center justify-center gap-4 rounded-xl bg-slate-950 text-sm text-slate-400">
+                <span className="h-10 w-10 animate-spin rounded-full border-2 border-violet-500/30 border-t-violet-400" />
+                <p>
+                  {isLoadingMetrics
+                    ? "Computando métricas ONA en el servidor…"
+                    : "Cargando mapa de conexiones…"}
+                </p>
               </div>
             ) : (
-              <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
+              <div className="space-y-6">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <article className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Cohesión de Equipo
+                    </p>
+                    <p className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">
+                      {calculatedNetworkMetrics.density.toFixed(1)}
+                      <span className="ml-1 text-lg font-medium text-slate-500">
+                        %
+                      </span>
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Densidad de conexiones activas
+                    </p>
+                  </article>
+
+                  <article className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Confianza Mutua
+                    </p>
+                    <p className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">
+                      {calculatedNetworkMetrics.reciprocityRate.toFixed(1)}
+                      <span className="ml-1 text-lg font-medium text-slate-500">
+                        %
+                      </span>
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Relaciones bidireccionales
+                    </p>
+                  </article>
+
+                  <article
+                    className={`rounded-xl border px-4 py-4 shadow-sm ${
+                      calculatedNetworkMetrics.isolatedParticipants.length > 0
+                        ? "border-red-300 bg-red-50"
+                        : "border-slate-200 bg-white"
+                    }`}
+                  >
+                    <p
+                      className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${
+                        calculatedNetworkMetrics.isolatedParticipants.length > 0
+                          ? "text-red-700"
+                          : "text-slate-500"
+                      }`}
+                    >
+                      Riesgo de Aislamiento
+                    </p>
+                    <p
+                      className={`mt-2 text-3xl font-semibold tracking-tight ${
+                        calculatedNetworkMetrics.isolatedParticipants.length > 0
+                          ? "text-red-700"
+                          : "text-slate-900"
+                      }`}
+                    >
+                      {calculatedNetworkMetrics.isolatedParticipants.length}
+                    </p>
+                    <p
+                      className={`mt-1 truncate text-xs ${
+                        calculatedNetworkMetrics.isolatedParticipants.length > 0
+                          ? "text-red-600"
+                          : "text-slate-500"
+                      }`}
+                    >
+                      {calculatedNetworkMetrics.isolatedParticipants.length > 0
+                        ? calculatedNetworkMetrics.isolatedParticipants
+                            .map((participant) => participant.name)
+                            .join(", ")
+                        : "Sin colaboradores aislados"}
+                    </p>
+                  </article>
+
+                  <article className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Líderes Informales
+                    </p>
+                    <ul className="mt-2 space-y-1.5">
+                      {calculatedNetworkMetrics.topInfluencers.length > 0 ? (
+                        calculatedNetworkMetrics.topInfluencers.map(
+                          (influencer, index) => (
+                            <li
+                              key={influencer.id}
+                              className="flex items-baseline justify-between gap-2 text-sm text-slate-800"
+                            >
+                              <span className="truncate font-medium">
+                                {index + 1}. {influencer.name}
+                              </span>
+                              <span className="shrink-0 text-xs text-slate-500">
+                                {influencer.inDegree} votos
+                              </span>
+                            </li>
+                          ),
+                        )
+                      ) : (
+                        <li className="text-sm text-slate-500">
+                          Sin datos suficientes
+                        </li>
+                      )}
+                    </ul>
+                  </article>
+                </div>
+
+              <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)] lg:items-stretch">
                 <aside className="space-y-6">
                   <div className="rounded-xl border border-violet-500/25 bg-slate-950/80 p-5 shadow-sm">
                     <h3 className="text-sm font-semibold uppercase tracking-wide text-violet-300">
@@ -1378,24 +2254,47 @@ export default function ResultadosPage() {
                     </h3>
                     <p className="mt-1 text-xs text-slate-400">
                       Proporción de conexiones reales frente al máximo posible
-                      en la red ({networkDensity.linkCount} enlaces ·{" "}
-                      {networkDensity.nodeCount} nodos).
+                      en la red ({networkDensity?.linkCount ?? 0} enlaces ·{" "}
+                      {networkDensity?.nodeCount ?? 0} nodos).
                     </p>
                     <div className="mt-4 flex items-end gap-3">
                       <p className="text-3xl font-semibold text-white">
-                        {networkDensity.densityPercent}%
+                        {networkDensity?.densityPercent ?? 0}%
                       </p>
                       <p className="pb-1 text-xs text-slate-500">
-                        {networkDensity.linkCount}/{networkDensity.maxPossibleLinks}{" "}
+                        {networkDensity?.linkCount ?? 0}/
+                        {networkDensity?.maxPossibleLinks ?? 0}{" "}
                         posibles
                       </p>
                     </div>
                     <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
                       <div
                         className="h-full rounded-full bg-violet-500 shadow-[0_0_12px_rgba(139,92,246,0.6)] transition-all"
-                        style={{ width: `${networkDensity.densityPercent}%` }}
+                        style={{
+                          width: `${networkDensity?.densityPercent ?? 0}%`,
+                        }}
                       />
                     </div>
+                    {culturaMetrics ? (
+                      <div className="mt-4 grid grid-cols-2 gap-3 border-t border-violet-500/20 pt-4">
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                            Cohesión
+                          </p>
+                          <p className="mt-1 text-lg font-semibold text-white">
+                            {culturaMetrics?.cohesionIndex ?? 0}%
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                            Confianza
+                          </p>
+                          <p className="mt-1 text-lg font-semibold text-white">
+                            {culturaMetrics?.trustIndex ?? 0}%
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="rounded-xl border border-violet-500/25 bg-slate-950/80 p-5 shadow-sm">
@@ -1426,31 +2325,45 @@ export default function ResultadosPage() {
                     <p className="mt-1 text-xs text-slate-400">
                       Subgrupos conectados internamente pero separados del resto
                       de la organización.
+                      {direccionMetrics ? (
+                        <>
+                          {" "}
+                          Fragmentación:{" "}
+                          <span className="font-medium text-cyan-300">
+                            {Math.round(
+                              (direccionMetrics?.fragmentationIndex ?? 0) * 100,
+                            )}
+                            %
+                          </span>
+                        </>
+                      ) : null}
                     </p>
 
-                    {networkSilos.length === 0 ? (
+                    {(networkSilos?.length ?? 0) === 0 ? (
                       <p className="mt-4 text-sm text-slate-400">
                         No hay silos significativos: la red está integrada o aún
                         no hay suficientes respuestas.
                       </p>
                     ) : (
                       <ul className="mt-4 space-y-3">
-                        {networkSilos.map((silo) => (
+                        {(networkSilos ?? []).map((silo) => (
                           <li
-                            key={silo.id}
+                            key={silo?.id ?? `silo-${silo?.size ?? 0}`}
                             className="rounded-lg border border-cyan-500/20 bg-slate-900 px-4 py-3 shadow-sm"
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div>
                                 <p className="text-xs font-medium text-cyan-400/80">
-                                  {silo.id.toUpperCase()}
+                                  {(silo?.id ?? "silo").toUpperCase()}
                                 </p>
                                 <p className="mt-1 text-sm font-semibold text-slate-100">
-                                  {silo.memberNames.join(", ")}
+                                  {(silo?.memberNames ?? []).join(", ") ||
+                                    "Sin miembros"}
                                 </p>
                               </div>
                               <span className="inline-flex shrink-0 rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2.5 py-1 text-xs font-semibold text-cyan-300">
-                                {silo.size} miembros
+                                {silo?.size ?? silo?.memberNames?.length ?? 0}{" "}
+                                miembros
                               </span>
                             </div>
                           </li>
@@ -1467,15 +2380,15 @@ export default function ResultadosPage() {
                       Top 3 colaboradores con más conexiones recibidas.
                     </p>
 
-                    {influenceLeaders.length === 0 ? (
+                    {(influenceLeaders?.length ?? 0) === 0 ? (
                       <p className="mt-4 text-sm text-slate-400">
                         Aún no hay datos suficientes para identificar líderes.
                       </p>
                     ) : (
                       <ol className="mt-4 space-y-3">
-                        {influenceLeaders.map((leader, index) => (
+                        {(influenceLeaders ?? []).map((leader, index) => (
                           <li
-                            key={`${leader.id}-${index}`}
+                            key={`${leader?.id ?? "leader"}-${index}`}
                             className="rounded-lg border border-violet-500/20 bg-slate-900 px-4 py-3 shadow-sm"
                           >
                             <div className="flex items-start justify-between gap-3">
@@ -1484,12 +2397,14 @@ export default function ResultadosPage() {
                                   #{index + 1}
                                 </p>
                                 <p className="mt-0.5 text-sm font-semibold text-slate-100">
-                                  {leader.name}
+                                  {leader?.name ?? "Desconocido"}
                                 </p>
                               </div>
                               <span className="inline-flex shrink-0 rounded-full border border-violet-400/30 bg-violet-500/15 px-2.5 py-1 text-xs font-semibold text-violet-300">
-                                {leader.votes}{" "}
-                                {leader.votes === 1 ? "conexión" : "conexiones"}
+                                {leader?.votes ?? 0}{" "}
+                                {(leader?.votes ?? 0) === 1
+                                  ? "conexión"
+                                  : "conexiones"}
                               </span>
                             </div>
                           </li>
@@ -1506,15 +2421,15 @@ export default function ResultadosPage() {
                       Top 3 colaboradores con más votos mutuos en el equipo.
                     </p>
 
-                    {reciprocityLeaders.length === 0 ? (
+                    {(reciprocityLeaders?.length ?? 0) === 0 ? (
                       <p className="mt-4 text-sm text-slate-400">
                         Aún no hay conexiones mutuas en este equipo
                       </p>
                     ) : (
                       <ol className="mt-4 space-y-3">
-                        {reciprocityLeaders.map((leader, index) => (
+                        {(reciprocityLeaders ?? []).map((leader, index) => (
                           <li
-                            key={`${leader.id}-${index}`}
+                            key={`${leader?.id ?? "reciprocity"}-${index}`}
                             className="rounded-lg border border-violet-500/20 bg-slate-900 px-4 py-3 shadow-sm"
                           >
                             <div className="flex items-start justify-between gap-3">
@@ -1523,12 +2438,12 @@ export default function ResultadosPage() {
                                   #{index + 1}
                                 </p>
                                 <p className="mt-0.5 text-sm font-semibold text-slate-100">
-                                  {leader.name}
+                                  {leader?.name ?? "Desconocido"}
                                 </p>
                               </div>
                               <span className="inline-flex shrink-0 rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300">
-                                {leader.mutualConnections}{" "}
-                                {leader.mutualConnections === 1
+                                {leader?.mutualConnections ?? 0}{" "}
+                                {(leader?.mutualConnections ?? 0) === 1
                                   ? "mutua"
                                   : "mutuas"}
                               </span>
@@ -1536,6 +2451,38 @@ export default function ResultadosPage() {
                           </li>
                         ))}
                       </ol>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-amber-500/25 bg-slate-950/80 p-5">
+                    <h3 className="text-sm font-semibold uppercase tracking-wide text-amber-300">
+                      Perfiles Saturados
+                    </h3>
+                    <p className="mt-1 text-xs text-slate-400">
+                      Alta carga relacional (in-degree y grado total elevados).
+                    </p>
+
+                    {(saturatedParticipants?.length ?? 0) === 0 ? (
+                      <p className="mt-4 text-sm text-slate-400">
+                        No se detectan perfiles saturados en este equipo.
+                      </p>
+                    ) : (
+                      <ul className="mt-4 space-y-3">
+                        {(saturatedParticipants ?? []).map((participant) => (
+                          <li
+                            key={participant?.id ?? participant?.name}
+                            className="flex items-center justify-between rounded-lg border border-amber-500/20 bg-slate-900 px-4 py-3 shadow-sm"
+                          >
+                            <p className="text-sm font-semibold text-slate-100">
+                              {participant?.name ?? "Desconocido"}
+                            </p>
+                            <span className="inline-flex shrink-0 rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-300">
+                              {participant?.inDegree ?? 0}↓ ·{" "}
+                              {participant?.outDegree ?? 0}↑
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
                     )}
                   </div>
 
@@ -1547,130 +2494,73 @@ export default function ResultadosPage() {
                       Miembros sin conexiones entrantes en la red del equipo.
                     </p>
 
-                    {isolatedParticipants.length === 0 ? (
+                    {(isolatedParticipants?.length ?? 0) === 0 ? (
                       <p className="mt-4 text-sm text-slate-400">
                         Todos los miembros están integrados en la red
                       </p>
                     ) : (
                       <ul className="mt-4 space-y-3">
-                        {isolatedParticipants.map((participant, index) => (
+                        {(isolatedParticipants ?? []).map(
+                          (participant, index) => (
                           <li
-                            key={`${participant.id}-${index}`}
+                            key={`${participant?.id ?? "isolated"}-${index}`}
                             className="flex items-center justify-between rounded-lg border border-red-500/20 bg-slate-900 px-4 py-3 shadow-sm"
                           >
                             <p className="text-sm font-semibold text-slate-100">
-                              {participant.name}
+                              {participant?.name ?? "Desconocido"}
                             </p>
                             <span className="inline-flex shrink-0 rounded-full border border-red-400/30 bg-red-500/10 px-2.5 py-1 text-xs font-semibold text-red-300">
                               Aislado
                             </span>
                           </li>
-                        ))}
+                          ),
+                        )}
                       </ul>
                     )}
                   </div>
                 </aside>
 
-                <div className="overflow-hidden rounded-xl border border-violet-500/30 bg-slate-950 shadow-[0_0_20px_rgba(139,92,246,0.12)]">
-                  <SociogramGraph graphData={affinityGraphData} />
+                <div className="relative isolate flex flex-col rounded-xl border border-violet-500/30 bg-slate-950 shadow-[0_0_20px_rgba(139,92,246,0.12)]">
+                  <div className="border-b border-violet-500/20 px-4 py-3 sm:px-5">
+                    <p className="text-sm font-medium text-slate-200">
+                    Densidad de la Red:{" "}
+                    {onaUtilsNetworkDensity?.densityPercent ??
+                      networkDensity?.densityPercent ??
+                      0}
+                    %
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Haz clic en un nodo para abrir la ficha individual.
+                      Arrastra nodos y usa la rueda para hacer zoom.
+                    </p>
+                  </div>
+                  <div className="relative w-full h-[500px] min-h-[500px] bg-slate-950 rounded-xl overflow-hidden flex items-center justify-center">
+                    {hasOnaGraphData ? (
+                      <SociogramGraph
+                        key={sociogramInstanceKey}
+                        graphData={onaGraphData}
+                        directed
+                        graphKey={sociogramInstanceKey}
+                        onNodeClick={handleSociogramNodeClick}
+                        width={700}
+                        height={480}
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-sm text-slate-400">
+                        {hasHydratedRoster
+                          ? "Roster hidratado, pero aún no hay nombramientos ONA para dibujar."
+                          : "Aún no hay datos de red para visualizar el sociograma."}
+                      </div>
+                    )}
+                  </div>
                 </div>
+              </div>
               </div>
             )}
           </div>
         </section>
 
-        {aiReport && (
-          <section className="overflow-hidden rounded-2xl border border-violet-500/60 bg-slate-950 shadow-[0_0_32px_rgba(139,92,246,0.35),0_0_64px_rgba(139,92,246,0.12)]">
-            <div className="border-b border-violet-500/30 bg-gradient-to-br from-slate-950 via-violet-950/40 to-slate-950 px-6 py-6">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex rounded-full border border-violet-400/50 bg-violet-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-violet-300 shadow-[0_0_12px_rgba(167,139,250,0.25)]">
-                  ElevateX · Consultoría IA
-                </span>
-                <span className="inline-flex rounded-full border border-cyan-400/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300">
-                  EDT + ONA
-                </span>
-              </div>
-              <h2 className="mt-3 text-xl font-semibold tracking-tight text-white">
-                Diagnóstico Estratégico Automatizado
-              </h2>
-              <p className="mt-1 max-w-2xl text-sm text-slate-400">
-                Motor de consultoría integrado — cruce Entorno, Dirección, Talento
-                y anomalías sociométricas.
-              </p>
-            </div>
-
-            <div className="space-y-5 p-6">
-              <article className="rounded-xl border border-violet-500/30 bg-slate-900/80 p-6 shadow-[inset_0_1px_0_rgba(167,139,250,0.08)]">
-                <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-violet-400">
-                  Resumen Ejecutivo
-                </h3>
-                <p className="mt-4 text-base leading-relaxed text-slate-200">
-                  {aiReport.resumenEjecutivo}
-                </p>
-              </article>
-
-              <article className="rounded-xl border border-violet-500/30 bg-slate-900/80 p-6 shadow-[inset_0_1px_0_rgba(167,139,250,0.08)]">
-                <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-red-400">
-                  Principales Riesgos
-                </h3>
-                <ul className="mt-4 space-y-3">
-                  {Array.isArray(aiReport.principalesRiesgos) &&
-                    aiReport.principalesRiesgos.map(
-                      (riesgo: string, index: number) => (
-                        <li
-                          key={`${index}-${riesgo.slice(0, 32)}`}
-                          className="flex gap-3 rounded-lg border border-red-500/20 bg-slate-950/60 px-4 py-3"
-                        >
-                          <span className="inline-flex shrink-0 rounded-full border border-red-500/40 bg-red-500/15 px-2.5 py-1 text-xs font-bold uppercase tracking-wide text-red-400 shadow-[0_0_10px_rgba(239,68,68,0.2)]">
-                            Riesgo {index + 1}
-                          </span>
-                          <p className="text-sm leading-relaxed text-slate-300">
-                            {riesgo}
-                          </p>
-                        </li>
-                      ),
-                    )}
-                </ul>
-              </article>
-
-              <article className="rounded-xl border border-violet-500/30 bg-slate-900/80 p-6 shadow-[inset_0_1px_0_rgba(167,139,250,0.08)]">
-                <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-400">
-                  Plan de Acción Inmediato
-                </h3>
-                <ol className="mt-4 space-y-3">
-                  {Array.isArray(aiReport.planAccionInmediato) &&
-                    aiReport.planAccionInmediato.map(
-                      (iniciativa: string, index: number) => (
-                        <li
-                          key={`${index}-${iniciativa.slice(0, 32)}`}
-                          className="flex gap-4 rounded-lg border border-cyan-500/20 bg-slate-950/60 px-4 py-4"
-                        >
-                          <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-cyan-400/50 bg-cyan-500/10 text-xs font-bold text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.2)]">
-                            {index + 1}
-                          </span>
-                          <p className="text-sm leading-relaxed text-slate-300">
-                            <span className="mr-2 text-cyan-400">▸</span>
-                            {iniciativa}
-                          </p>
-                        </li>
-                      ),
-                    )}
-                </ol>
-              </article>
-            </div>
-          </section>
-        )}
-
         </div>
-
-        {generating && !aiReport && (
-          <section className="overflow-hidden rounded-2xl border border-violet-500/40 bg-slate-950 p-8 shadow-[0_0_24px_rgba(139,92,246,0.25)] print:hidden">
-            <div className="flex items-center justify-center gap-3 text-sm font-medium text-violet-300">
-              <span className="h-5 w-5 animate-spin rounded-full border-2 border-violet-500/30 border-t-violet-400" />
-              Analizando datos con IA...
-            </div>
-          </section>
-        )}
 
         <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 px-6 py-4">
@@ -1683,11 +2573,16 @@ export default function ResultadosPage() {
             </p>
           </div>
 
-          {isLoading && !demoModeEnabled ? (
+          {isLoadingMetrics && !demoModeEnabled ? (
+            <div className="flex flex-col items-center gap-3 px-6 py-12 text-center text-sm text-slate-500">
+              <span className="h-8 w-8 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" />
+              Computando ranking ONA en el servidor…
+            </div>
+          ) : isLoading && !demoModeEnabled ? (
             <div className="px-6 py-12 text-center text-sm text-slate-500">
               Cargando resultados…
             </div>
-          ) : ranking.length === 0 ? (
+          ) : !hasRankingData ? (
             <div className="px-6 py-12 text-center text-sm text-slate-500">
               No hay colaboradores en este equipo.
             </div>
@@ -1723,7 +2618,7 @@ export default function ResultadosPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-white">
-                  {ranking.map((entry, index) => {
+                  {(ranking ?? []).map((entry, index) => {
                     const hasCompletedSurvey = participantsWithResponses.has(
                       normalizeParticipantId(entry.id),
                     );
@@ -1844,68 +2739,113 @@ export default function ResultadosPage() {
         </section>
       </main>
 
-      {selectedParticipant && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 print:hidden"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="individual-insight-title"
-        >
+      {selectedParticipant ? (
+        <div className="fixed inset-0 z-50 print:hidden" role="dialog" aria-modal="true">
           <button
             type="button"
-            className="absolute inset-0 bg-slate-900/55 backdrop-blur-[1px]"
-            aria-label="Cerrar radiografía del colaborador"
+            className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] transition-opacity"
+            aria-label="Cerrar ficha del colaborador"
             onClick={closeIndividualInsightModal}
           />
-          <section className="relative max-h-[90vh] w-full max-w-2xl overflow-hidden rounded-2xl border border-violet-200 bg-white shadow-2xl">
-            <div className="border-b border-violet-100 bg-gradient-to-r from-violet-50 via-white to-indigo-50 px-6 py-5">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <span className="inline-flex rounded-full border border-violet-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-wide text-violet-700">
-                    Diagnóstico por Persona
-                  </span>
-                  <h2
-                    id="individual-insight-title"
-                    className="mt-3 text-xl font-semibold text-slate-900"
-                  >
-                    Radiografía de {selectedParticipant.name}
-                  </h2>
-                  <p className="mt-1 text-sm text-slate-600">
-                    Indegree {selectedParticipant.indegree} · Reciprocidad{" "}
-                    {selectedParticipant.reciprocity} ·{" "}
-                    {selectedParticipant.silo}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={closeIndividualInsightModal}
-                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50"
-                >
-                  Cerrar
-                </button>
-              </div>
-            </div>
-            <div className="max-h-[60vh] overflow-y-auto px-6 py-5">
-              {isGeneratingIndividual && !individualInsight ? (
-                <div className="flex items-center justify-center gap-3 py-10 text-sm font-medium text-violet-700">
-                  <span className="h-5 w-5 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
-                  Generando radiografía con IA…
-                </div>
-              ) : individualInsight ? (
-                <article className="rounded-xl border border-violet-100 bg-gradient-to-br from-slate-50 via-white to-violet-50/40 p-5 shadow-sm">
-                  <p className="whitespace-pre-wrap text-base leading-relaxed text-slate-700">
-                    {individualInsight}
-                  </p>
-                </article>
-              ) : (
-                <p className="py-6 text-center text-sm text-slate-500">
-                  No se pudo cargar el diagnóstico individual.
+          <aside
+            className="absolute inset-y-0 right-0 flex w-full max-w-md flex-col border-l border-violet-500/20 bg-slate-900/90 text-slate-100 shadow-[-24px_0_60px_rgba(0,0,0,0.45)] backdrop-blur-md sm:max-w-lg"
+            aria-labelledby="individual-profile-title"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-violet-500/15 px-6 py-5">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300/90">
+                  Ficha individual · ElevateX
                 </p>
-              )}
+                <h2
+                  id="individual-profile-title"
+                  className="mt-2 truncate text-2xl font-semibold tracking-tight text-white sm:text-3xl"
+                >
+                  {selectedParticipant.name}
+                </h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  {selectedParticipant.silo}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeIndividualInsightModal}
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-violet-500/25 bg-slate-950/50 text-lg leading-none text-slate-300 transition-colors hover:border-violet-400/40 hover:bg-slate-800 hover:text-white"
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
             </div>
-          </section>
+
+            <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-violet-500/20 bg-slate-950/55 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    Indegree
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold tabular-nums text-violet-200">
+                    {selectedParticipant.indegree}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">Votos recibidos</p>
+                </div>
+                <div className="rounded-xl border border-violet-500/20 bg-slate-950/55 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    Weighted Indegree
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold tabular-nums text-indigo-200">
+                    {selectedParticipant.weightedIndegree}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Influencia ponderada
+                  </p>
+                </div>
+                <div className="rounded-xl border border-emerald-500/20 bg-slate-950/55 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    Reciprocidad
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold tabular-nums text-emerald-300">
+                    {selectedParticipant.reciprocityPercent}%
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {selectedParticipant.reciprocity} conexiones mutuas
+                  </p>
+                </div>
+              </div>
+
+              <section className="rounded-xl border border-violet-500/20 bg-gradient-to-br from-slate-950/80 via-slate-900/40 to-violet-950/30 p-5">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300/80">
+                  Bondades y retos · IA
+                </p>
+
+                {individualInsight ? (
+                  <article className="mt-4 whitespace-pre-wrap text-sm leading-relaxed text-slate-200">
+                    {individualInsight}
+                  </article>
+                ) : (
+                  <div className="mt-4 space-y-4" aria-live="polite">
+                    <div className="flex items-center gap-3 text-sm font-medium text-violet-200">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-violet-400/30 border-t-violet-300" />
+                      Analizando fortalezas y retos con IA...
+                    </div>
+                    <div className="space-y-2.5">
+                      <div className="h-3 w-[92%] animate-pulse rounded bg-slate-700/70" />
+                      <div className="h-3 w-[78%] animate-pulse rounded bg-slate-700/55" />
+                      <div className="h-3 w-[85%] animate-pulse rounded bg-slate-700/45" />
+                      <div className="mt-4 h-3 w-[70%] animate-pulse rounded bg-violet-500/20" />
+                      <div className="h-3 w-[60%] animate-pulse rounded bg-violet-500/15" />
+                    </div>
+                    {!isGeneratingIndividual ? (
+                      <p className="pt-1 text-xs text-slate-500">
+                        Espacio reservado para bondades y retos personalizados
+                        del perfil.
+                      </p>
+                    ) : null}
+                  </div>
+                )}
+              </section>
+            </div>
+          </aside>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

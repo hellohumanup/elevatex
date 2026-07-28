@@ -1,8 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { FALLBACK_TEST_TENANT_ID as CANONICAL_FALLBACK_TEST_TENANT_ID } from "@/lib/groups";
 
-/** Tenant fijo para inserts locales sin sesión (RLS dev). */
-export const FALLBACK_TEST_TENANT_ID = "cbd62767-1644-477c-a496-e26ea31dc109";
+export type { Database } from "@/lib/supabase/database.types";
+
+/** Re-export canónico desde lib/groups (evitar drift de UUID). */
+export const FALLBACK_TEST_TENANT_ID = CANONICAL_FALLBACK_TEST_TENANT_ID;
 
 /** @deprecated Usar FALLBACK_TEST_TENANT_ID */
 export const LOCAL_DEV_TENANT_ID = FALLBACK_TEST_TENANT_ID;

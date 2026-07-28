@@ -7,6 +7,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { assertSupabaseEnv, logSupabaseEnvDebug } from "@/lib/supabase/env";
 
 export { createBrowserClient, createServerClient } from "@supabase/ssr";
+export type { Database } from "@/lib/supabase/database.types";
 
 let cachedClient: SupabaseClient | undefined;
 

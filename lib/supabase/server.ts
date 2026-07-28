@@ -2,6 +2,8 @@ import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { assertSupabaseEnv } from "@/lib/supabase/env";
 
+export type { Database } from "@/lib/supabase/database.types";
+
 export async function createSupabaseServerClient() {
   const cookieStore = await cookies();
   const { supabaseUrl, supabaseAnonKey } = assertSupabaseEnv();

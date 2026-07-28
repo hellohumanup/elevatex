@@ -3,8 +3,26 @@ import {
   extractEdtAnswerLettersFromAnswers,
 } from "@/lib/edtMetrics";
 
-/** Umbral de afinidad: ~65% de coincidencia sobre 28 preguntas EDT. */
-export const EDT_AFFINITY_MATCH_THRESHOLD = 18;
+/** Umbral de afinidad en producción: ~65% de coincidencia sobre 28 preguntas EDT. */
+export const EDT_AFFINITY_MATCH_THRESHOLD_PRODUCTION = 18;
+
+/**
+ * Umbral intermedio en desarrollo (~32 % sobre 28 preguntas).
+ * Equilibrio entre evitar telarañas (umbral 5) y grafo vacío con datos simulados (umbral 13+).
+ * TODO(producción): revisar si el umbral dev sigue siendo necesario tras datos reales.
+ */
+export const EDT_AFFINITY_MATCH_THRESHOLD_DEV = 9;
+
+export function resolveEdtAffinityMatchThreshold(
+  nodeEnv: string | undefined = process.env.NODE_ENV,
+): number {
+  return nodeEnv === "development"
+    ? EDT_AFFINITY_MATCH_THRESHOLD_DEV
+    : EDT_AFFINITY_MATCH_THRESHOLD_PRODUCTION;
+}
+
+/** @deprecated Usar resolveEdtAffinityMatchThreshold() */
+export const EDT_AFFINITY_MATCH_THRESHOLD = resolveEdtAffinityMatchThreshold();
 
 export type EdtAffinityGraphLink = {
   source: string;
@@ -34,43 +52,65 @@ export type EdtAffinityResponse = {
   answers: unknown;
 };
 
+export type EdtPairAffinityScore = {
+  /** Coincidencias exactas de letra (A|B|C|D) en la misma pregunta. */
+  matches: number;
+  /** Preguntas 1–28 en las que ambos participantes respondieron. */
+  comparableQuestions: number;
+};
+
 /**
- * Cuenta coincidencias exactas de opción (A|B|C|D) pregunta a pregunta
- * entre dos perfiles EDT (preguntas 1–28).
+ * Compara estrictamente par a par (pregunta N vs pregunta N) dos perfiles EDT.
+ * Solo cuenta una coincidencia cuando ambos tienen respuesta en esa pregunta
+ * y la letra es idéntica; preguntas sin respuesta de uno u otro se ignoran.
  */
+export function scoreEdtPairAffinity(
+  left: Partial<Record<number, EdtAnswerLetter>>,
+  right: Partial<Record<number, EdtAnswerLetter>>,
+  questionStart = 1,
+  questionEnd = 28,
+): EdtPairAffinityScore {
+  let matches = 0;
+  let comparableQuestions = 0;
+
+  for (let question = questionStart; question <= questionEnd; question += 1) {
+    const leftAnswer = left[question];
+    const rightAnswer = right[question];
+
+    if (leftAnswer === undefined || rightAnswer === undefined) {
+      continue;
+    }
+
+    comparableQuestions += 1;
+
+    if (leftAnswer === rightAnswer) {
+      matches += 1;
+    }
+  }
+
+  return { matches, comparableQuestions };
+}
+
+/** @deprecated Preferir scoreEdtPairAffinity para validar cobertura del par. */
 export function countEdtAnswerLetterMatches(
   left: Partial<Record<number, EdtAnswerLetter>>,
   right: Partial<Record<number, EdtAnswerLetter>>,
   questionStart = 1,
   questionEnd = 28,
 ): number {
-  let matches = 0;
-
-  for (let question = questionStart; question <= questionEnd; question += 1) {
-    const leftAnswer = left[question];
-    const rightAnswer = right[question];
-
-    if (
-      leftAnswer !== undefined &&
-      rightAnswer !== undefined &&
-      leftAnswer === rightAnswer
-    ) {
-      matches += 1;
-    }
-  }
-
-  return matches;
+  return scoreEdtPairAffinity(left, right, questionStart, questionEnd).matches;
 }
 
 /**
  * Construye la red de afinidad cruzada EDT comparando todos los pares
  * de participantes. Crea un enlace cuando comparten la misma opción en
- * al menos `threshold` preguntas (por defecto 18 ≈ 65%).
+ * al menos `threshold` preguntas coincidentes y ambos perfiles con al menos
+ * `threshold` preguntas comparables en común (cobertura mínima del par).
  */
 export function buildEdtAffinityGraphData(
   participants: readonly EdtAffinityParticipant[],
   responses: readonly EdtAffinityResponse[],
-  threshold = EDT_AFFINITY_MATCH_THRESHOLD,
+  threshold = resolveEdtAffinityMatchThreshold(),
 ): EdtAffinityGraphData {
   const participantIds = new Set(
     participants.map((participant) => String(participant.id)),
@@ -116,9 +156,12 @@ export function buildEdtAffinityGraphData(
         continue;
       }
 
-      const matches = countEdtAnswerLetterMatches(answersA, answersB);
+      const { matches, comparableQuestions } = scoreEdtPairAffinity(
+        answersA,
+        answersB,
+      );
 
-      if (matches >= threshold) {
+      if (comparableQuestions >= threshold && matches >= threshold) {
         links.push({
           source: participantA.id,
           target: participantB.id,

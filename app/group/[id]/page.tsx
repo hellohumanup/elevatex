@@ -5,42 +5,36 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { fetchGroupById } from "@/lib/groups";
 import { toSupabaseGroupId } from "@/lib/groupId";
+import {
+  parseParticipantImportText,
+  toParticipantInsertRows,
+} from "@/lib/parseParticipantImport";
 import { fetchQuestionnaireResponseCountForGroup } from "@/lib/questionnaire";
 import { getSupabase } from "@/lib/supabase";
+
+type SurveyStatus = "pending_send" | "sent" | "completed";
 
 type Participant = {
   id: string;
   name: string;
   email: string | null;
   group_id: string;
+  magic_token: string | null;
+  survey_status: SurveyStatus;
 };
 
-type ParsedParticipantRow = {
-  name: string;
-  email: string | null;
+const SURVEY_STATUS_LABELS: Record<SurveyStatus, string> = {
+  pending_send: "Pendiente de envío",
+  sent: "Enviado",
+  completed: "Completado",
 };
 
-function parseParticipantRows(text: string): ParsedParticipantRow[] {
-  return text
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const commaIndex = line.indexOf(",");
+function normalizeSurveyStatus(value: unknown): SurveyStatus {
+  if (value === "sent" || value === "completed" || value === "pending_send") {
+    return value;
+  }
 
-      if (commaIndex === -1) {
-        return { name: line.trim(), email: null };
-      }
-
-      const name = line.slice(0, commaIndex).trim();
-      const email = line.slice(commaIndex + 1).trim();
-
-      return {
-        name,
-        email: email.length > 0 ? email : null,
-      };
-    })
-    .filter((row) => row.name.length > 0);
+  return "pending_send";
 }
 
 export default function GroupPage() {
@@ -57,6 +51,9 @@ export default function GroupPage() {
   const [responseCount, setResponseCount] = useState(0);
   const [isLoadingResponses, setIsLoadingResponses] = useState(true);
   const [isSendingInvitations, setIsSendingInvitations] = useState(false);
+  const [inviteSuccessMessage, setInviteSuccessMessage] = useState<string | null>(
+    null,
+  );
   const [deletingParticipantId, setDeletingParticipantId] = useState<
     string | null
   >(null);
@@ -71,7 +68,12 @@ export default function GroupPage() {
     const { data, error: fetchError } = await fetchGroupById(groupId);
 
     if (fetchError) {
-      setError(fetchError.message);
+      setError(fetchError.message ?? "No se pudo cargar el equipo.");
+      return;
+    }
+
+    if (!data) {
+      setError("No se encontró el equipo solicitado.");
       return;
     }
 
@@ -83,7 +85,7 @@ export default function GroupPage() {
 
     const { data, error: fetchError } = await getSupabase()
       .from("participants")
-      .select("*")
+      .select("id, name, email, group_id, magic_token, access_token, survey_status")
       .eq("group_id", databaseGroupId)
       .order("name", { ascending: true });
 
@@ -93,15 +95,28 @@ export default function GroupPage() {
     }
 
     setParticipants(
-      (data ?? []).map((participant) => ({
-        id: String(participant.id),
-        name: participant.name,
-        email:
-          typeof participant.email === "string" && participant.email.trim()
-            ? participant.email.trim()
-            : null,
-        group_id: String(participant.group_id),
-      })),
+      (data ?? []).map((participant) => {
+        const magicToken =
+          typeof participant.magic_token === "string" &&
+          participant.magic_token.trim()
+            ? participant.magic_token.trim()
+            : typeof participant.access_token === "string" &&
+                participant.access_token.trim()
+              ? participant.access_token.trim()
+              : null;
+
+        return {
+          id: String(participant.id),
+          name: participant.name,
+          email:
+            typeof participant.email === "string" && participant.email.trim()
+              ? participant.email.trim()
+              : null,
+          group_id: String(participant.group_id),
+          magic_token: magicToken,
+          survey_status: normalizeSurveyStatus(participant.survey_status),
+        };
+      }),
     );
   }, [groupId]);
 
@@ -137,25 +152,46 @@ export default function GroupPage() {
   }, [fetchGroup, fetchParticipants, fetchResponseCount]);
 
   async function handleAddParticipants() {
-    const rows = parseParticipantRows(namesText);
+    const rows = parseParticipantImportText(namesText);
 
     if (rows.length === 0) {
-      setError("Introduce al menos un nombre de colaborador.");
+      setError(
+        "Introduce al menos un colaborador (ej: Valeria Iglesias, valeria@empresa.com).",
+      );
+      return;
+    }
+
+    const invalidEmailLines = namesText
+      .split(/\r?\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => {
+        if (!/[,@;]/.test(line) && !line.includes("<")) {
+          return false;
+        }
+
+        const parsed = parseParticipantImportText(line)[0];
+        return Boolean(parsed) && parsed.email === null && /@/.test(line);
+      });
+
+    if (invalidEmailLines.length > 0) {
+      setError(
+        `Correo no válido en: ${invalidEmailLines.slice(0, 2).join(" · ")}. Usa el formato Nombre, email@empresa.com`,
+      );
       return;
     }
 
     setIsSaving(true);
     setError(null);
 
+    const payload = toParticipantInsertRows(
+      rows,
+      toSupabaseGroupId(groupId),
+    );
+
     const { error: insertError } = await getSupabase()
       .from("participants")
-      .insert(
-        rows.map((row) => ({
-          name: row.name,
-          email: row.email,
-          group_id: toSupabaseGroupId(groupId),
-        })),
-      );
+      .insert(payload);
 
     setIsSaving(false);
 
@@ -206,16 +242,59 @@ export default function GroupPage() {
   }
 
   async function handleSendInvitations() {
+    if (isSendingInvitations) {
+      return;
+    }
+
     setIsSendingInvitations(true);
+    setError(null);
+    setInviteSuccessMessage(null);
 
     try {
-      await fetch("/api/send-invitations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ groupId }),
-      });
-    } catch (error) {
-      console.error("[GroupPage] Error al enviar:", error);
+      const response = await fetch(
+        `/api/groups/${encodeURIComponent(groupId)}/send-invites`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+        },
+      );
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        message?: string;
+        sent?: number;
+        simulated?: number;
+        failed?: number;
+        usedSimulation?: boolean;
+      };
+
+      if (!response.ok || !payload.success) {
+        throw new Error(
+          payload.error ?? "No se pudieron enviar las invitaciones.",
+        );
+      }
+
+      const sent = payload.sent ?? 0;
+      const simulated = payload.simulated ?? 0;
+      const failed = payload.failed ?? 0;
+      const delivered = sent + simulated;
+
+      setInviteSuccessMessage(
+        payload.usedSimulation
+          ? `${simulated} invitación${simulated === 1 ? "" : "es"} simulada${simulated === 1 ? "" : "s"} en local (revisa la terminal). ${failed > 0 ? `${failed} con error.` : ""}`.trim()
+          : `${delivered} invitación${delivered === 1 ? "" : "es"} enviada${delivered === 1 ? "" : "s"} correctamente.${failed > 0 ? ` ${failed} fallida${failed === 1 ? "" : "s"}.` : ""}`,
+      );
+
+      await fetchParticipants();
+    } catch (err) {
+      console.error("[GroupPage] Error al enviar invitaciones:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "No se pudieron enviar las invitaciones.",
+      );
     } finally {
       setIsSendingInvitations(false);
     }
@@ -248,6 +327,12 @@ export default function GroupPage() {
           </div>
         )}
 
+        {inviteSuccessMessage && (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            {inviteSuccessMessage}
+          </div>
+        )}
+
         <section className="rounded-xl border-2 border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50 shadow-sm">
           <div className="flex flex-col gap-6 p-6 md:flex-row md:items-center md:justify-between md:p-8">
             <div className="min-w-0 flex-1 md:max-w-md md:pr-6">
@@ -255,8 +340,8 @@ export default function GroupPage() {
                 Dinámica de Equipo
               </h2>
               <p className="mt-2 text-sm leading-relaxed text-amber-800/80">
-                Comparte el enlace o envía invitaciones por correo con el token
-                único de cada colaborador.
+                Envía invitaciones por correo con magic links personales
+                (/votar/…) o comparte el enlace genérico del equipo.
               </p>
             </div>
 
@@ -315,7 +400,12 @@ export default function GroupPage() {
           </h2>
           <p className="mt-1 text-sm text-slate-500">
             Pega un colaborador por línea en formato{" "}
-            <span className="font-medium text-slate-700">Nombre, email</span>.
+            <span className="font-medium text-slate-700">
+              Nombre, email@empresa.com
+            </span>
+            . El sistema genera automáticamente el enlace mágico (
+            <code className="text-xs">magic_token</code>) y deja el estado en{" "}
+            <span className="font-medium text-slate-700">pending_send</span>.
             Si omites el correo, se guardará solo el nombre.
           </p>
 
@@ -324,7 +414,7 @@ export default function GroupPage() {
             onChange={(event) => setNamesText(event.target.value)}
             rows={6}
             placeholder={
-              "Ana Martínez, ana@empresa.com\nLuis Fernández, luis@empresa.com"
+              "Valeria Iglesias, valeria@empresa.com\nAna Martínez, ana@empresa.com\nLuis Fernández, luis@empresa.com"
             }
             className="mt-4 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
           />
@@ -369,6 +459,12 @@ export default function GroupPage() {
                   >
                     Correo Electrónico
                   </th>
+                  <th
+                    scope="col"
+                    className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500"
+                  >
+                    Estado
+                  </th>
                   <th scope="col" className="px-6 py-3">
                     <span className="sr-only">Acciones</span>
                   </th>
@@ -378,7 +474,7 @@ export default function GroupPage() {
                 {isLoading ? (
                   <tr>
                     <td
-                      colSpan={3}
+                      colSpan={4}
                       className="px-6 py-12 text-center text-sm text-slate-500"
                     >
                       Cargando colaboradores…
@@ -387,7 +483,7 @@ export default function GroupPage() {
                 ) : participants.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={3}
+                      colSpan={4}
                       className="px-6 py-12 text-center text-sm text-slate-500"
                     >
                       Aún no hay colaboradores en este equipo.
@@ -401,6 +497,9 @@ export default function GroupPage() {
                       </td>
                       <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-600">
                         {participant.email || "Sin correo"}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-600">
+                        {SURVEY_STATUS_LABELS[participant.survey_status]}
                       </td>
                       <td className="whitespace-nowrap px-6 py-4 text-right">
                         <button

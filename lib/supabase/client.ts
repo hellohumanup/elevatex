@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabaseEnv } from "@/lib/supabase/env";
 
 export { getSupabaseEnv };
+export type { Database } from "@/lib/supabase/database.types";
 
 export function createSupabaseBrowserClient() {
   return createBrowserSupabaseClient();

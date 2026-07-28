@@ -1,5 +1,7 @@
 import { getSupabase } from "@/lib/supabase";
 
+export type { OrganizationRecord } from "@/lib/supabase/database.types";
+
 const IS_LOCAL_DEV = process.env.NODE_ENV === "development";
 
 const FALLBACK_ORGANIZATION_NAME = "Vínculo · Organización principal";

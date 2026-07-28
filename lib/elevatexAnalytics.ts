@@ -4,6 +4,7 @@ import {
   calculateIndegree,
   calculateIsolation,
   calculateNetworkDensity,
+  calculateNetworkReciprocity,
   calculateReciprocity,
   detectNetworkSilos,
   type GraphLink,
@@ -218,6 +219,10 @@ function buildOnaMetricsFromLinks(
     participants.map((participant) => [participant.id, participant.name]),
   );
   const networkDensity = calculateNetworkDensity(participants.length, links);
+  const networkReciprocity = calculateNetworkReciprocity(
+    links,
+    participants.map((participant) => participant.id),
+  );
   const nodes = buildGraphNodes(participants, links);
   const indegreeMap = calculateIndegree(links);
 
@@ -253,6 +258,7 @@ function buildOnaMetricsFromLinks(
 
   return {
     networkDensity,
+    networkReciprocity,
     links: [...links],
     nodes,
     influenceLeaders,

@@ -1,4 +1,5 @@
 import { toSupabaseGroupId } from "@/lib/groupId";
+import { resolveOptionalManagerId } from "@/lib/managers";
 import {
   ensureOrganizationExists,
   fetchFirstOrganizationId,
@@ -6,22 +7,39 @@ import {
   resolveOrganizationIdForInsert,
 } from "@/lib/organizations";
 import { getSupabase } from "@/lib/supabase";
+import type {
+  GroupInsert,
+  GroupRecord as DatabaseGroupRecord,
+} from "@/lib/supabase/database.types";
 
-/** Tenant de pruebas inyectado cuando no hay perfil o tenant_id es NULL. */
-export const FALLBACK_TEST_TENANT_ID = "cbd62767-1644-477c-a496-e26ea31dc109";
+/**
+ * Tenant canónico de desarrollo local (Supabase seed / migraciones).
+ * Única fuente de verdad — no duplicar este literal en APIs.
+ */
+export const FALLBACK_TEST_TENANT_ID =
+  "cbd62767-1644-477c-a496-e26090532585" as const;
 
 /** @deprecated Usar FALLBACK_TEST_TENANT_ID */
 export const LOCAL_DEV_TENANT_ID = FALLBACK_TEST_TENANT_ID;
 
-export type GroupRecord = {
-  id: string;
-  name: string;
-  age_band: string;
-  created_at: string;
-  organization_id: string | null;
-  manager_id: string | null;
-  tenant_id: string | null;
-};
+/**
+ * Tenant activo en local. Si ACTIVE_TENANT_ID difiere del canónico
+ * (p. ej. UUID obsoleto en .env.local), se ignora para evitar 403.
+ */
+export function resolveDevActiveTenantId(): string {
+  const fromEnv = process.env.ACTIVE_TENANT_ID?.trim();
+  if (!fromEnv || fromEnv === FALLBACK_TEST_TENANT_ID) {
+    return FALLBACK_TEST_TENANT_ID;
+  }
+
+  console.warn(
+    `[tenant] ACTIVE_TENANT_ID (${fromEnv}) ≠ FALLBACK_TEST_TENANT_ID (${FALLBACK_TEST_TENANT_ID}); se usa el tenant canónico local.`,
+  );
+  return FALLBACK_TEST_TENANT_ID;
+}
+
+/** Fila tipada de `public.groups` (organization_id / manager_id nullable). */
+export type GroupRecord = DatabaseGroupRecord;
 
 const GROUP_COLUMNS =
   "id, name, age_band, created_at, organization_id, manager_id, tenant_id";
@@ -86,13 +104,10 @@ async function resolveTenantIdForInsert(
   return String(profile.tenant_id);
 }
 
-async function insertGroupViaDevApi(payload: {
-  name: string;
-  age_band: string;
-  organization_id: string;
-  manager_id: string | null;
-  tenant_id: string;
-}): Promise<{ data: GroupRecord | null; error: SupabaseErrorShape | null }> {
+async function insertGroupViaDevApi(payload: GroupInsert): Promise<{
+  data: GroupRecord | null;
+  error: SupabaseErrorShape | null;
+}> {
   try {
     const response = await fetch("/api/groups", {
       method: "POST",
@@ -135,7 +150,8 @@ export async function fetchGroupsForOrganization(organizationId: string) {
     .from("groups")
     .select(GROUP_COLUMNS)
     .eq("organization_id", organizationId)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .returns<GroupRecord[]>();
 }
 
 export async function fetchGroupsWithParticipantCounts(
@@ -207,28 +223,33 @@ export async function fetchGroupsForTenant() {
   }
 }
 
-export async function fetchGroupById(groupId: string) {
+export async function fetchGroupById(groupId: string): Promise<{
+  data: GroupRecord | null;
+  error: SupabaseErrorShape | null;
+}> {
   return getSupabase()
     .from("groups")
     .select(GROUP_COLUMNS)
     .eq("id", toSupabaseGroupId(groupId))
-    .single();
+    .maybeSingle<GroupRecord>();
 }
 
 export type CreateGroupInput = {
   name: string;
   age_band: string;
-  /** UUID de la organización tenant. Si se omite, se resuelve desde sesión o demo. */
+  /** UUID de `organizations.id`. Si se omite, se resuelve tenant demo/local. */
   organization_id?: string | null;
-  /** UUID del manager (profiles.id = auth.users.id). Si se omite, se usa el usuario autenticado. */
+  /**
+   * UUID opcional de `managers.id` (no confundir con auth.users.id).
+   * Si se omite → null para no romper pruebas locales sin fila en managers.
+   */
   manager_id?: string | null;
 };
 
-function normalizeManagerId(value: unknown): string | null {
-  return normalizeOrganizationId(value);
-}
-
-export async function insertGroup(input: CreateGroupInput) {
+export async function insertGroup(input: CreateGroupInput): Promise<{
+  data: GroupRecord | null;
+  error: ReturnType<typeof normalizeInsertError> | null;
+}> {
   const supabase = getSupabase();
 
   const name = input.name.trim();
@@ -271,11 +292,10 @@ export async function insertGroup(input: CreateGroupInput) {
       DEMO_DASHBOARD_ORGANIZATION_ID;
   }
 
-  const managerId =
-    normalizeManagerId(input.manager_id) ??
-    (session?.user?.id ? normalizeManagerId(session.user.id) : null);
+  // manager_id opcional: solo si el caller pasa un managers.id válido.
+  const managerId = resolveOptionalManagerId(input.manager_id);
 
-  const payload = {
+  const payload: GroupInsert = {
     name,
     age_band: ageBand,
     organization_id: organizationId,
@@ -294,7 +314,7 @@ export async function insertGroup(input: CreateGroupInput) {
     .from("groups")
     .insert(payload)
     .select(GROUP_COLUMNS)
-    .single();
+    .single<GroupRecord>();
 
   if (!error && data) {
     console.log("[insertGroup] Equipo creado correctamente:", data);
@@ -319,7 +339,10 @@ export async function insertGroup(input: CreateGroupInput) {
   const fallback = await insertGroupViaDevApi(payload);
 
   if (fallback.data) {
-    console.log("[insertGroup] Equipo creado vía API (service_role):", fallback.data);
+    console.log(
+      "[insertGroup] Equipo creado vía API (service_role):",
+      fallback.data,
+    );
     return { data: fallback.data, error: null };
   }
 
