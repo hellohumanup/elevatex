@@ -335,12 +335,15 @@ export default function GroupPage() {
     } catch (err) {
       console.error("[GroupPage] Error al enviar invitaciones:", err);
       setInviteSuccessMessage(null);
-      const uiErrorMessage =
+      const rawErrorMessage =
         err instanceof Error
           ? err.message
           : "No se pudieron enviar las invitaciones.";
+      const uiErrorMessage =
+        rawErrorMessage === "Service Role Key no configurada"
+          ? "No se pudieron enviar las invitaciones porque la configuración del servidor no está completa."
+          : rawErrorMessage;
       setError(uiErrorMessage);
-      window.alert(uiErrorMessage);
     } finally {
       setIsSendingInvitations(false);
     }

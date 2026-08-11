@@ -111,6 +111,15 @@ async function ensureParticipantMagicToken(
 
 export async function POST(request: Request) {
   try {
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+
+    if (!serviceRoleKey) {
+      return NextResponse.json(
+        { error: "Service Role Key no configurada" },
+        { status: 500 },
+      );
+    }
+
     let body: SendInvitesRequestBody;
 
     try {
@@ -146,12 +155,8 @@ export async function POST(request: Request) {
 
     if (!supabaseAdmin) {
       return NextResponse.json(
-        {
-          success: false,
-          error:
-            "SUPABASE_SERVICE_ROLE_KEY no configurada. Añádela en .env.local y reinicia el servidor.",
-        },
-        { status: 503 },
+        { error: "Service Role Key no configurada" },
+        { status: 500 },
       );
     }
 
