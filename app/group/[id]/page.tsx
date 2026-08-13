@@ -12,7 +12,7 @@ import {
 import { fetchQuestionnaireResponseCountForGroup } from "@/lib/questionnaire";
 import { getSupabase } from "@/lib/supabase";
 
-type SurveyStatus = "pending_send" | "sent" | "completed";
+type SurveyStatus = "pending_send" | "sent" | "completed" | "error_envio";
 
 type Participant = {
   id: string;
@@ -27,10 +27,16 @@ const SURVEY_STATUS_LABELS: Record<SurveyStatus, string> = {
   pending_send: "Pendiente de envío",
   sent: "Enviado",
   completed: "Completado",
+  error_envio: "Error de envío",
 };
 
 function normalizeSurveyStatus(value: unknown): SurveyStatus {
-  if (value === "sent" || value === "completed" || value === "pending_send") {
+  if (
+    value === "sent" ||
+    value === "completed" ||
+    value === "pending_send" ||
+    value === "error_envio"
+  ) {
     return value;
   }
 
@@ -287,7 +293,7 @@ export default function GroupPage() {
         message?: string;
         processed?: number;
         sent?: number;
-        simulated?: number;
+        simulated?: boolean | number;
         failed?: number;
         skipped?: number;
         usedSimulation?: boolean;
@@ -301,7 +307,8 @@ export default function GroupPage() {
         );
       }
 
-      if (!response.ok || !payload.success) {
+      const isSimulatedSuccess = payload.simulated === true;
+      if (!response.ok || (!payload.success && !isSimulatedSuccess)) {
         const apiErrorMessage =
           payload.error ??
           `La API de invitaciones respondió con HTTP ${response.status}.`;
@@ -315,15 +322,15 @@ export default function GroupPage() {
       }
 
       const sent = payload.sent ?? 0;
-      const simulated = payload.simulated ?? 0;
       const failed = payload.failed ?? 0;
-      const processed = payload.processed ?? sent + simulated;
+      const processed = payload.processed ?? sent;
+      const usedSimulation = isSimulatedSuccess || payload.usedSimulation === true;
 
       const successMessage =
         typeof payload.message === "string" && payload.message.trim().length > 0
           ? payload.message.trim()
-          : payload.usedSimulation
-            ? `${simulated} invitación${simulated === 1 ? "" : "es"} simulada${simulated === 1 ? "" : "s"} en local (revisa la terminal).${failed > 0 ? ` ${failed} con error.` : ""}`
+          : usedSimulation
+            ? "Invitaciones procesadas en modo simulado."
             : `${processed} invitación${processed === 1 ? "" : "es"} procesada${processed === 1 ? "" : "s"} correctamente.${failed > 0 ? ` ${failed} fallida${failed === 1 ? "" : "s"}.` : ""}`;
 
       console.log("📧 [Invitaciones Enviadas]:", {
@@ -344,6 +351,7 @@ export default function GroupPage() {
           ? "No se pudieron enviar las invitaciones porque la configuración del servidor no está completa."
           : rawErrorMessage;
       setError(uiErrorMessage);
+      await fetchParticipants();
     } finally {
       setIsSendingInvitations(false);
     }
@@ -547,7 +555,13 @@ export default function GroupPage() {
                       <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-600">
                         {participant.email || "Sin correo"}
                       </td>
-                      <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-600">
+                      <td
+                        className={`whitespace-nowrap px-6 py-4 text-sm ${
+                          participant.survey_status === "error_envio"
+                            ? "font-medium text-red-600"
+                            : "text-slate-600"
+                        }`}
+                      >
                         {SURVEY_STATUS_LABELS[participant.survey_status]}
                       </td>
                       <td className="whitespace-nowrap px-6 py-4 text-right">

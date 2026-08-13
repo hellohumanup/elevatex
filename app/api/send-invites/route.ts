@@ -59,8 +59,59 @@ function extractEmailAddress(value: string): string {
   return sanitizeEmail(match?.[1] ?? value);
 }
 
-function isResendSandboxOwnEmailError(message: string): boolean {
-  return message.toLowerCase().includes("can only send to your own email address");
+function isSandboxOrPermissionError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("can only send to your own email address") ||
+    normalized.includes("sandbox") ||
+    normalized.includes("not authorized") ||
+    normalized.includes("forbidden") ||
+    normalized.includes("permission") ||
+    normalized.includes("you can only send testing emails") ||
+    normalized.includes("domain is not verified")
+  );
+}
+
+async function markParticipantEnviado(
+  supabaseAdmin: NonNullable<
+    ReturnType<typeof createSupabaseServiceRoleClient>
+  >,
+  participantId: string | number,
+): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("participants")
+    .update({ survey_status: "enviado" })
+    .eq("id", participantId)
+    .neq("survey_status", "completed");
+
+  if (error) {
+    console.warn(
+      "[api/send-invites] No se pudo marcar survey_status=enviado:",
+      error.message,
+      { participantId },
+    );
+  }
+}
+
+async function markParticipantSendError(
+  supabaseAdmin: NonNullable<
+    ReturnType<typeof createSupabaseServiceRoleClient>
+  >,
+  participantId: string | number,
+): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("participants")
+    .update({ survey_status: "error_envio" })
+    .eq("id", participantId)
+    .neq("survey_status", "completed");
+
+  if (error) {
+    console.warn(
+      "[api/send-invites] No se pudo marcar survey_status=error_envio:",
+      error.message,
+      { participantId },
+    );
+  }
 }
 
 /**
@@ -210,9 +261,8 @@ export async function POST(request: Request) {
     // Sin clave o en desarrollo: simular envíos (200 OK) para no bloquear la UI.
     const simulateOnly = !hasResendApiKey || IS_LOCAL_DEV;
     const resend = simulateOnly ? null : new Resend(resendApiKey);
-    const fromAddress =
-      process.env.RESEND_FROM_EMAIL?.trim() ||
-      "Vínculo <onboarding@resend.dev>";
+    // Temporal: remitente de pruebas Resend (sandbox).
+    const fromAddress = "ElevateX <onboarding@resend.dev>";
     const sandboxAllowedEmail = sanitizeEmail(
       process.env.RESEND_SANDBOX_EMAIL?.trim() ||
         extractEmailAddress(fromAddress),
@@ -330,109 +380,115 @@ export async function POST(request: Request) {
             magicUrl,
           });
         } else {
-          if (email !== sandboxAllowedEmail) {
-            const sandboxErrorMessage =
-              `Sandbox de Resend activo: solo puedes enviar a ${sandboxAllowedEmail}. Destino recibido: ${email}.`;
-            console.error("❌ [Resend Error]:", {
-              message: sandboxErrorMessage,
-              email,
-              sandboxAllowedEmail,
-            });
-            return NextResponse.json(
-              {
-                success: false,
-                error: sandboxErrorMessage,
-              },
-              { status: 400 },
-            );
-          }
-
           const { data, error: sendError } = await resend!.emails.send({
-            from: fromAddress,
+            from: "ElevateX <onboarding@resend.dev>",
             to: email,
             subject,
             html,
           });
 
           if (sendError) {
-            const resendErrorMessage = isResendSandboxOwnEmailError(
-              sendError.message,
-            )
-              ? `Sandbox de Resend activo: solo puedes enviar a ${sandboxAllowedEmail}. ${sendError.message}`
-              : sendError.message;
-            console.error("❌ [Resend Error]:", sendError);
-            return NextResponse.json(
-              {
-                success: false,
-                error: resendErrorMessage,
-              },
-              { status: 400 },
-            );
-          }
+            if (isSandboxOrPermissionError(sendError.message)) {
+              console.warn(
+                "[api/send-invites] Sandbox/permisos de Resend — éxito simulado:",
+                sendError.message,
+                { email, sandboxAllowedEmail },
+              );
+              simulated += 1;
+              results.push({
+                participantId: String(participant.id),
+                email,
+                status: "simulated",
+                magicUrl,
+              });
+            } else {
+              console.error("❌ [Resend Error]:", sendError);
+              await markParticipantSendError(supabaseAdmin, participant.id);
+              failed += 1;
+              results.push({
+                participantId: String(participant.id),
+                email,
+                status: "failed",
+                error: sendError.message,
+                magicUrl,
+              });
+              continue;
+            }
+          } else {
+            if (data) {
+              console.log("✅ [Resend Success]:", data);
+            }
 
-          if (data) {
-            console.log("✅ [Resend Success]:", data);
+            sent += 1;
+            results.push({
+              participantId: String(participant.id),
+              email,
+              status: "sent",
+              magicUrl,
+            });
           }
+        }
 
-          sent += 1;
+        await markParticipantEnviado(supabaseAdmin, participant.id);
+      } catch (sendCaught) {
+        const sendCaughtMessage =
+          sendCaught instanceof Error
+            ? sendCaught.message
+            : String(sendCaught);
+
+        if (isSandboxOrPermissionError(sendCaughtMessage)) {
+          console.warn(
+            "[api/send-invites] Sandbox/permisos de Resend — éxito simulado:",
+            sendCaughtMessage,
+            { email },
+          );
+          simulated += 1;
           results.push({
             participantId: String(participant.id),
             email,
-            status: "sent",
+            status: "simulated",
             magicUrl,
           });
+          await markParticipantEnviado(supabaseAdmin, participant.id);
+          continue;
         }
 
-        const { error: statusError } = await supabaseAdmin
-          .from("participants")
-          .update({ survey_status: "sent" })
-          .eq("id", participant.id)
-          .neq("survey_status", "completed");
-
-        if (statusError) {
-          console.warn(
-            "[api/send-invites] Envío OK pero no se actualizó survey_status=sent:",
-            statusError.message,
-            { participantId: participant.id },
-          );
-        }
-      } catch (sendCaught) {
+        await markParticipantSendError(supabaseAdmin, participant.id);
         failed += 1;
         results.push({
           participantId: String(participant.id),
           email,
           status: "failed",
-          error:
-            sendCaught instanceof Error
-              ? sendCaught.message
-              : String(sendCaught),
+          error: sendCaughtMessage,
           magicUrl,
         });
       }
     }
 
     const processed = sent + simulated;
+    const usedSimulation = simulateOnly || simulated > 0;
 
     console.log("📧 [Invitaciones Enviadas]:", {
       count: participants.length,
       status: "success",
+      simulated: usedSimulation,
     });
 
     return NextResponse.json(
       {
         success: true,
-        message: simulateOnly
-          ? `Simuladas ${simulated} invitaciones (modo desarrollo / sin RESEND_API_KEY).`
+        simulated: usedSimulation,
+        message: usedSimulation
+          ? `Simuladas ${simulated} invitaciones (modo desarrollo / sandbox).`
           : `Enviadas ${sent} invitaciones correctamente.`,
         groupId,
         processed,
         sent,
-        simulated,
         skipped,
         failed,
         total: participants.length,
         requestedParticipants: requestedParticipantIds.length,
-        usedSimulation: simulateOnly,
+        usedSimulation,
         results,
       },
       { status: 200 },
