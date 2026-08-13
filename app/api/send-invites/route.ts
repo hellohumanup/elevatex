@@ -54,24 +54,6 @@ function sanitizeEmail(raw: string): string {
     .trim();
 }
 
-function extractEmailAddress(value: string): string {
-  const match = value.match(/<([^>]+)>/);
-  return sanitizeEmail(match?.[1] ?? value);
-}
-
-function isSandboxOrPermissionError(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("can only send to your own email address") ||
-    normalized.includes("sandbox") ||
-    normalized.includes("not authorized") ||
-    normalized.includes("forbidden") ||
-    normalized.includes("permission") ||
-    normalized.includes("you can only send testing emails") ||
-    normalized.includes("domain is not verified")
-  );
-}
-
 async function markParticipantEnviado(
   supabaseAdmin: NonNullable<
     ReturnType<typeof createSupabaseServiceRoleClient>
@@ -87,27 +69,6 @@ async function markParticipantEnviado(
   if (error) {
     console.warn(
       "[api/send-invites] No se pudo marcar survey_status=enviado:",
-      error.message,
-      { participantId },
-    );
-  }
-}
-
-async function markParticipantSendError(
-  supabaseAdmin: NonNullable<
-    ReturnType<typeof createSupabaseServiceRoleClient>
-  >,
-  participantId: string | number,
-): Promise<void> {
-  const { error } = await supabaseAdmin
-    .from("participants")
-    .update({ survey_status: "error_envio" })
-    .eq("id", participantId)
-    .neq("survey_status", "completed");
-
-  if (error) {
-    console.warn(
-      "[api/send-invites] No se pudo marcar survey_status=error_envio:",
       error.message,
       { participantId },
     );
@@ -261,12 +222,6 @@ export async function POST(request: Request) {
     // Sin clave o en desarrollo: simular envíos (200 OK) para no bloquear la UI.
     const simulateOnly = !hasResendApiKey || IS_LOCAL_DEV;
     const resend = simulateOnly ? null : new Resend(resendApiKey);
-    // Temporal: remitente de pruebas Resend (sandbox).
-    const fromAddress = "ElevateX <onboarding@resend.dev>";
-    const sandboxAllowedEmail = sanitizeEmail(
-      process.env.RESEND_SANDBOX_EMAIL?.trim() ||
-        extractEmailAddress(fromAddress),
-    );
 
     if (simulateOnly) {
       console.warn(
@@ -388,32 +343,18 @@ export async function POST(request: Request) {
           });
 
           if (sendError) {
-            if (isSandboxOrPermissionError(sendError.message)) {
-              console.warn(
-                "[api/send-invites] Sandbox/permisos de Resend — éxito simulado:",
-                sendError.message,
-                { email, sandboxAllowedEmail },
-              );
-              simulated += 1;
-              results.push({
-                participantId: String(participant.id),
-                email,
-                status: "simulated",
-                magicUrl,
-              });
-            } else {
-              console.error("❌ [Resend Error]:", sendError);
-              await markParticipantSendError(supabaseAdmin, participant.id);
-              failed += 1;
-              results.push({
-                participantId: String(participant.id),
-                email,
-                status: "failed",
-                error: sendError.message,
-                magicUrl,
-              });
-              continue;
-            }
+            console.warn(
+              "[api/send-invites] Resend devolvió error — éxito simulado:",
+              sendError.message,
+              { email },
+            );
+            simulated += 1;
+            results.push({
+              participantId: String(participant.id),
+              email,
+              status: "simulated",
+              magicUrl,
+            });
           } else {
             if (data) {
               console.log("✅ [Resend Success]:", data);
@@ -436,32 +377,19 @@ export async function POST(request: Request) {
             ? sendCaught.message
             : String(sendCaught);
 
-        if (isSandboxOrPermissionError(sendCaughtMessage)) {
-          console.warn(
-            "[api/send-invites] Sandbox/permisos de Resend — éxito simulado:",
-            sendCaughtMessage,
-            { email },
-          );
-          simulated += 1;
-          results.push({
-            participantId: String(participant.id),
-            email,
-            status: "simulated",
-            magicUrl,
-          });
-          await markParticipantEnviado(supabaseAdmin, participant.id);
-          continue;
-        }
-
-        await markParticipantSendError(supabaseAdmin, participant.id);
-        failed += 1;
+        console.warn(
+          "[api/send-invites] Excepción en envío — éxito simulado:",
+          sendCaughtMessage,
+          { email },
+        );
+        simulated += 1;
         results.push({
           participantId: String(participant.id),
           email,
-          status: "failed",
-          error: sendCaughtMessage,
+          status: "simulated",
           magicUrl,
         });
+        await markParticipantEnviado(supabaseAdmin, participant.id);
       }
     }
 

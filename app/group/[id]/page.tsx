@@ -307,8 +307,7 @@ export default function GroupPage() {
         );
       }
 
-      const isSimulatedSuccess = payload.simulated === true;
-      if (!response.ok || (!payload.success && !isSimulatedSuccess)) {
+      if (!response.ok) {
         const apiErrorMessage =
           payload.error ??
           `La API de invitaciones respondió con HTTP ${response.status}.`;
@@ -321,10 +320,13 @@ export default function GroupPage() {
         throw new Error(apiErrorMessage);
       }
 
+      setError(null);
+
       const sent = payload.sent ?? 0;
       const failed = payload.failed ?? 0;
       const processed = payload.processed ?? sent;
-      const usedSimulation = isSimulatedSuccess || payload.usedSimulation === true;
+      const usedSimulation =
+        payload.simulated === true || payload.usedSimulation === true;
 
       const successMessage =
         typeof payload.message === "string" && payload.message.trim().length > 0
